@@ -1,0 +1,7 @@
+.build/
+PDFConverter.app/
+*.zip
+.DS_Store
+Resources/PDFConverter.iconset/
+SCRATCHPAD.md
+screenshots/
