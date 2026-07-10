@@ -27,7 +27,9 @@ Converted files land in `~/Documents/PDF-Converted/` (changeable in Settings).
 
 ## Privacy note
 
-The full content of every PDF you drop is sent to Google Gemini via the OpenRouter API for processing. Do not convert documents containing customer or otherwise confidential data unless that is cleared for your use case.
+The full content of every PDF you drop is sent to Google Gemini for processing. With the default OpenRouter backend, routing goes through OpenRouter (US). Do not convert documents containing customer or otherwise confidential data unless that is cleared for your use case.
+
+For EU processing, switch the backend to **Vertex AI (EU)** in Settings: content then goes directly to Google Vertex AI in europe-west1. You need access to a GCP project with the Vertex AI API enabled. Run `gcloud auth application-default login` once, then paste the JSON from `~/.config/gcloud/application_default_credentials.json` into Settings along with the project ID, and click "Test Connection".
 
 ## Build from source
 

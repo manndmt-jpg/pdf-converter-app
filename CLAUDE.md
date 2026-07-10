@@ -36,8 +36,12 @@ release script signs each nested binary individually.
   no text layer -> per-page Gemini Vision OCR (300 dpi PNG). Retries 5xx/429/network 3x.
 - `Prompts.swift` - system prompts, verbatim from parse_contract.py
 - `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown()
-- `AppSettings.swift` / `SettingsView.swift` - model, prompt, output folder (UserDefaults)
+- `AppSettings.swift` / `SettingsView.swift` - backend picker (OpenRouter | Vertex AI EU),
+  model, prompt, output folder (UserDefaults)
 - `Keychain.swift` - OpenRouter key storage
+- `VertexAuth.swift` - authorized_user JSON parsing + OAuth2 token refresh (cached actor),
+  ported from Meeting Scribe's GeminiService. Vertex config (project, region, credentials
+  JSON) lives in UserDefaults like Meeting Scribe. Only gemini-2.5-flash in europe-west1.
 
 ## Config
 

@@ -132,20 +132,34 @@ final class ConversionQueue: ObservableObject {
         }
 
         let settings = AppSettings.current()
-        guard let apiKey = Keychain.readAPIKey(), !apiKey.isEmpty else {
-            items[idx].status = .failed(ConversionError.noAPIKey.localizedDescription)
-            processNextIfIdle()
-            return
+        let apiKey = Keychain.readAPIKey() ?? ""
+        switch settings.backend {
+        case .openrouter:
+            guard !apiKey.isEmpty else {
+                items[idx].status = .failed(ConversionError.noAPIKey.localizedDescription)
+                processNextIfIdle()
+                return
+            }
+        case .vertex:
+            guard settings.hasVertexConfig else {
+                items[idx].status = .failed(ConversionError.vertexNotConfigured.localizedDescription)
+                processNextIfIdle()
+                return
+            }
         }
 
         currentItemID = itemID
         items[idx].status = .converting(detail: "Starting…", fraction: nil)
 
         let converter = Converter(
+            backend: settings.backend,
             apiKey: apiKey,
             model: settings.model,
             userPrompt: settings.userPrompt,
-            outputFolder: settings.outputFolder
+            outputFolder: settings.outputFolder,
+            vertexProjectId: settings.vertexProjectId,
+            vertexRegion: settings.vertexRegion,
+            vertexCredentials: settings.vertexCredentials
         )
 
         currentTask = Task {

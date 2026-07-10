@@ -4,6 +4,8 @@ import AppKit
 
 enum ConversionError: LocalizedError {
     case noAPIKey
+    case vertexNotConfigured
+    case vertexAuthFailed
     case unreadablePDF
     case encryptedPDF
     case emptyPDF
@@ -17,6 +19,10 @@ enum ConversionError: LocalizedError {
         switch self {
         case .noAPIKey:
             return "No API key set. Open Settings and paste your OpenRouter key."
+        case .vertexNotConfigured:
+            return "Vertex AI is not configured. Open Settings and add project ID and credentials."
+        case .vertexAuthFailed:
+            return "Google token refresh failed. Re-run 'gcloud auth application-default login' and paste the new credentials JSON in Settings."
         case .unreadablePDF:
             return "File could not be opened as a PDF."
         case .encryptedPDF:
@@ -43,13 +49,18 @@ struct ConversionResult {
 
 // Ports the pipeline from parse_contract.py: text-layer PDFs get one structured
 // JSON call; scanned PDFs get per-page Gemini Vision OCR.
+// Backends: OpenRouter (chat/completions) or Vertex AI EU (generateContent).
 struct Converter {
-    let apiKey: String
+    let backend: Backend
+    let apiKey: String            // OpenRouter key; unused for Vertex
     let model: String
     let userPrompt: String
     let outputFolder: URL
+    let vertexProjectId: String
+    let vertexRegion: String
+    let vertexCredentials: VertexCredentials?
 
-    private static let apiURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
+    private static let openRouterURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
 
     struct PDFInfo {
         let pageCount: Int
@@ -119,8 +130,7 @@ struct Converter {
             guard let page = doc.page(at: i), let png = Self.renderPNG(page: page) else {
                 throw ConversionError.renderFailed(i + 1)
             }
-            let dataURL = "data:image/png;base64,\(png.base64EncodedString())"
-            let pageMD = try await chat(system: Prompts.visionSystem, userText: userPrompt, imageDataURLs: [dataURL])
+            let pageMD = try await chat(system: Prompts.visionSystem, userText: userPrompt, pngBase64Images: [png.base64EncodedString()])
             pagesMD.append("## Seite \(i + 1)\n\n\(pageMD.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         return "# \(sourceName)\n\n" + pagesMD.joined(separator: "\n\n---\n\n")
@@ -139,40 +149,12 @@ struct Converter {
 
     // MARK: - API
 
-    private func chat(system: String, userText: String, imageDataURLs: [String] = [], maxAttempts: Int = 3) async throws -> String {
-        guard !apiKey.isEmpty else { throw ConversionError.noAPIKey }
-
-        let userContent: Any
-        if imageDataURLs.isEmpty {
-            userContent = userText
-        } else {
-            var parts: [[String: Any]] = [["type": "text", "text": userText]]
-            for url in imageDataURLs {
-                parts.append(["type": "image_url", "image_url": ["url": url]])
-            }
-            userContent = parts
-        }
-
-        let body: [String: Any] = [
-            "model": model,
-            "messages": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": userContent],
-            ],
-            "max_tokens": 32768,
-        ]
-
-        var request = URLRequest(url: Self.apiURL)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 600
-
+    private func chat(system: String, userText: String, pngBase64Images: [String] = [], maxAttempts: Int = 3) async throws -> String {
         var lastError: Error = ConversionError.network("unknown")
         for attempt in 1...maxAttempts {
             try Task.checkCancellation()
             do {
+                let request = try await buildRequest(system: system, userText: userText, pngBase64Images: pngBase64Images)
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     throw ConversionError.network("no HTTP response")
@@ -185,11 +167,7 @@ struct Converter {
                     }
                     throw ConversionError.apiError(http.statusCode, String(detail))
                 }
-                guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let choices = obj["choices"] as? [[String: Any]],
-                      let message = choices.first?["message"] as? [String: Any],
-                      let content = message["content"] as? String,
-                      !content.isEmpty
+                guard let content = Self.extractContent(from: data, backend: backend), !content.isEmpty
                 else { throw ConversionError.emptyResponse }
                 return content
             } catch let error as RetryableError {
@@ -204,6 +182,82 @@ struct Converter {
             }
         }
         throw lastError
+    }
+
+    private func buildRequest(system: String, userText: String, pngBase64Images: [String]) async throws -> URLRequest {
+        switch backend {
+        case .openrouter:
+            guard !apiKey.isEmpty else { throw ConversionError.noAPIKey }
+            let userContent: Any
+            if pngBase64Images.isEmpty {
+                userContent = userText
+            } else {
+                var parts: [[String: Any]] = [["type": "text", "text": userText]]
+                for b64 in pngBase64Images {
+                    parts.append(["type": "image_url", "image_url": ["url": "data:image/png;base64,\(b64)"]])
+                }
+                userContent = parts
+            }
+            let body: [String: Any] = [
+                "model": model,
+                "messages": [
+                    ["role": "system", "content": system],
+                    ["role": "user", "content": userContent],
+                ],
+                "max_tokens": 32768,
+            ]
+            var request = URLRequest(url: Self.openRouterURL)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.timeoutInterval = 600
+            return request
+
+        case .vertex:
+            guard let creds = vertexCredentials, !vertexProjectId.isEmpty, !vertexRegion.isEmpty else {
+                throw ConversionError.vertexNotConfigured
+            }
+            let token = try await VertexTokenProvider.shared.accessToken(for: creds)
+            let endpoint = "https://\(vertexRegion)-aiplatform.googleapis.com/v1/projects/\(vertexProjectId)/locations/\(vertexRegion)/publishers/google/models/\(model):generateContent"
+            guard let url = URL(string: endpoint) else {
+                throw ConversionError.network("invalid Vertex endpoint")
+            }
+            var parts: [[String: Any]] = [["text": userText]]
+            for b64 in pngBase64Images {
+                parts.append(["inline_data": ["mime_type": "image/png", "data": b64]])
+            }
+            let body: [String: Any] = [
+                "systemInstruction": ["parts": [["text": system]]],
+                "contents": [["role": "user", "parts": parts]],
+                "generationConfig": ["maxOutputTokens": 32768],
+            ]
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            request.timeoutInterval = 600
+            return request
+        }
+    }
+
+    private static func extractContent(from data: Data, backend: Backend) -> String? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        switch backend {
+        case .openrouter:
+            guard let choices = obj["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any]
+            else { return nil }
+            return message["content"] as? String
+        case .vertex:
+            guard let candidates = obj["candidates"] as? [[String: Any]],
+                  let content = candidates.first?["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]]
+            else { return nil }
+            let text = parts.compactMap { $0["text"] as? String }.joined()
+            return text.isEmpty ? nil : text
+        }
     }
 
     private struct RetryableError: Error {
