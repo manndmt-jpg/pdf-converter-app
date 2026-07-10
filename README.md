@@ -14,6 +14,8 @@ Drop a PDF on the window or Dock icon, get a `.md` file in your output folder.
 - Output language stays the original (German documents stay German)
 - Automatic updates (Sparkle): the app offers new versions on launch
 
+**New here? Follow the [step-by-step setup guide](SETUP.md).**
+
 ## Install
 
 1. Download the newest `PDFConverter-x.y.zip` from the [latest release](../../releases/latest)
