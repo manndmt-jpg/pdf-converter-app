@@ -22,7 +22,12 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$PROJECT_DIR/Resources/PDFConverter.icns" "$APP_BUNDLE/Contents/Resources/PDFConverter.icns"
+
+# Embed Sparkle framework
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+cp -R "$BUILD_DIR/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,6 +50,14 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <string>APPL</string>
     <key>CFBundleIconFile</key>
     <string>PDFConverter</string>
+    <key>SUFeedURL</key>
+    <string>https://d-mann.dev/pdfconverter/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>AL9z2NUlQtIl76yraXk8zqoE5VKu5HT5tSvXivELHRU=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -72,6 +85,17 @@ PLIST
 
 if [ "$RELEASE" = "1" ]; then
     SIGN_IDENTITY="Developer ID Application: Dimitri Mann (CYK4F5SZTP)"
+    SPARKLE_FW="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+    echo "Signing Sparkle framework (all nested binaries, inner to outer)..."
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/Updater.app/Contents/MacOS/Updater"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/Updater.app"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW/Versions/B/Autoupdate"
+    codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp "$SPARKLE_FW"
+
     echo "Signing with Developer ID (hardened runtime)..."
     codesign -s "$SIGN_IDENTITY" --force --options runtime --timestamp \
         --identifier "com.dimitrimann.pdfconverter" "$APP_BUNDLE"
@@ -91,7 +115,8 @@ if [ "$RELEASE" = "1" ]; then
     echo "Done: $APP_BUNDLE (notarized)"
     echo "Release zip: $RELEASE_ZIP"
 else
-    # Ad-hoc sign (local development)
+    # Ad-hoc sign (local development) — framework first, then app, never --deep
+    codesign -s - --force "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
     codesign -s - --force "$APP_BUNDLE"
     echo ""
     echo "Done: $APP_BUNDLE"

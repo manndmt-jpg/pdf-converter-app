@@ -1,10 +1,19 @@
 import SwiftUI
 import AppKit
+import Sparkle
 
 @main
 struct PDFConverterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var queue = ConversionQueue.shared
+
+    // Constructed in init: Sparkle reads its UserDefaults keys at updater creation
+    private let updaterController: SPUStandardUpdaterController
+
+    init() {
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -13,6 +22,13 @@ struct PDFConverterApp: App {
         }
         .defaultSize(width: 440, height: 560)
         .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updaterController.checkForUpdates(nil)
+                }
+            }
+        }
 
         Settings {
             SettingsView()

@@ -16,6 +16,18 @@ open PDFConverter.app
 
 Debug compile only: `swift build`
 
+## Release a new version
+
+```bash
+./scripts/release.sh 1.2      # notarize + EdDSA-sign + appcast + scp to VPS + gh release
+```
+
+Sparkle auto-updates: feed at https://d-mann.dev/pdfconverter/appcast.xml (VPS Caddy
+serves /home/dev/Projects/pdfconverter-releases/). EdDSA key shared with Meeting
+Scribe (Keychain + ~/.sparkle_eddsa_key backup). RELEASE_NOTES.md becomes the
+Sparkle "What's New" text. Never codesign Sparkle.framework with --deep; the
+release script signs each nested binary individually.
+
 ## Architecture (Sources/)
 
 - `PDFConverterApp.swift` - @main, AppDelegate (Dock/Finder open, quit guard, env key import)

@@ -12,13 +12,16 @@ Drop a PDF on the window or Dock icon, get a `.md` file in your output folder.
 - Per-file cancel, retry on failure, clear error messages
 - Cost guard: scanned documents over 100 pages ask before converting
 - Output language stays the original (German documents stay German)
+- Automatic updates (Sparkle): the app offers new versions on launch
 
 ## Install
 
-1. Download `PDFConverter.zip` from the [latest release](../../releases/latest)
+1. Download the newest `PDFConverter-x.y.zip` from the [latest release](../../releases/latest)
 2. Unzip and drag `PDFConverter.app` to `/Applications` (the app is notarized by Apple, it opens without warnings)
 3. Get an OpenRouter API key at [openrouter.ai/keys](https://openrouter.ai/keys)
 4. Open the app, press Cmd+, (Settings), paste the key, and click "Test Key"
+
+Updates arrive automatically: the app checks on launch and asks before installing.
 
 Converted files land in `~/Documents/PDF-Converted/` (changeable in Settings).
 
@@ -39,10 +42,10 @@ open PDFConverter.app
 
 Tip: if `OPENROUTER_API_KEY` is set in your shell and you start the binary once from the terminal (`./PDFConverter.app/Contents/MacOS/PDFConverter`), the app imports the key into your Keychain automatically.
 
-Maintainer release (Developer ID signing + notarization):
+Maintainer release (notarize, EdDSA-sign, appcast, upload, GitHub release):
 
 ```bash
-./scripts/build-app.sh 1.0 --release
+./scripts/release.sh 1.2
 ```
 
 ## Settings
