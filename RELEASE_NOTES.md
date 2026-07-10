@@ -1,5 +1,3 @@
-# Version 1.4
+# Version 1.5
 
-- Preview now shows the complete converted document, not just the beginning
-- Preview text is selectable, copy any part of it directly
-- Wider default window on fresh installs
+- The app now introduces itself as "PDF to MD AI Converter" (menu bar, About window, update dialogs)

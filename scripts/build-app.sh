@@ -39,9 +39,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <key>CFBundleIdentifier</key>
     <string>com.dimitrimann.pdfconverter</string>
     <key>CFBundleName</key>
-    <string>PDF Converter</string>
+    <string>PDF to MD AI Converter</string>
     <key>CFBundleDisplayName</key>
-    <string>PDF Converter</string>
+    <string>PDF to MD AI Converter</string>
     <key>CFBundleVersion</key>
     <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>

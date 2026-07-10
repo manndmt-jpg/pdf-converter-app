@@ -1,4 +1,4 @@
-# PDF Converter
+# PDF to MD AI Converter
 
 A small native macOS app that converts PDFs into clean, structured Markdown. Built for German legal and insurance documents (contracts, Grundbuchauszüge, notarial deeds), but works on any PDF.
 

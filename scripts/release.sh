@@ -99,7 +99,7 @@ cat > "$APPCAST_PATH" << EOF
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
-    <title>PDF Converter Updates</title>
+    <title>PDF to MD AI Converter Updates</title>
     <link>${DOWNLOAD_BASE}/appcast.xml</link>
     <description>Most recent changes with links to updates.</description>
     <language>en</language>
