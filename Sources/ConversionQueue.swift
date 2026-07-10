@@ -19,8 +19,27 @@ struct QueueItem: Identifiable, Equatable {
     let id = UUID()
     let url: URL
     var status: Status = .waiting
+    var pageCount: Int?
+    var hasTextLayer: Bool?
+    var startedAt: Date?
+    var finishedAt: Date?
+
+    var duration: String? {
+        guard let startedAt, let finishedAt else { return nil }
+        let secs = Int(finishedAt.timeIntervalSince(startedAt))
+        return "\(secs / 60):\(String(format: "%02d", secs % 60))"
+    }
+
+    var isFinished: Bool { ConversionQueue.isFinished(status) }
 
     var filename: String { url.lastPathComponent }
+
+    var pagePill: String? {
+        guard let pageCount else { return nil }
+        let pages = "\(pageCount) page\(pageCount == 1 ? "" : "s")"
+        let kind = hasTextLayer == true ? "text layer" : (hasTextLayer == false ? "scanned" : nil)
+        return kind.map { "\(pages) · \($0)" } ?? pages
+    }
 }
 
 struct HistoryEntry: Codable, Identifiable {
@@ -38,7 +57,7 @@ final class ConversionQueue: ObservableObject {
     @Published private(set) var history: [HistoryEntry] = []
 
     private var currentTask: Task<Void, Never>?
-    private var currentItemID: UUID?
+    @Published private(set) var currentItemID: UUID?
 
     // Scanned PDFs above this page count cost one Vision call per page; ask first.
     static let largeFileThreshold = 100
@@ -50,6 +69,8 @@ final class ConversionQueue: ObservableObject {
     var isBusy: Bool {
         items.contains { $0.status.isActive || $0.status == .waiting }
     }
+
+    var activeItemID: UUID? { currentItemID }
 
     // MARK: - Public actions
 
@@ -95,7 +116,7 @@ final class ConversionQueue: ObservableObject {
         items.removeAll { $0.id == id && Self.isFinished($0.status) }
     }
 
-    static func isFinished(_ status: QueueItem.Status) -> Bool {
+    nonisolated static func isFinished(_ status: QueueItem.Status) -> Bool {
         switch status {
         case .done, .cancelled, .failed: return true
         case .waiting, .awaitingConfirmation, .converting: return false
@@ -119,6 +140,8 @@ final class ConversionQueue: ObservableObject {
         if !skipLargeFileCheck {
             do {
                 let info = try Converter.inspect(url: url)
+                items[idx].pageCount = info.pageCount
+                items[idx].hasTextLayer = info.hasTextLayer
                 if !info.hasTextLayer && info.pageCount > Self.largeFileThreshold {
                     items[idx].status = .awaitingConfirmation(pageCount: info.pageCount)
                     processNextIfIdle()
@@ -150,6 +173,7 @@ final class ConversionQueue: ObservableObject {
 
         currentItemID = itemID
         items[idx].status = .converting(detail: "Starting…", fraction: nil)
+        items[idx].startedAt = Date()
 
         let converter = Converter(
             backend: settings.backend,
@@ -189,6 +213,9 @@ final class ConversionQueue: ObservableObject {
     private func updateStatus(_ id: UUID, _ status: QueueItem.Status) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         items[idx].status = status
+        if Self.isFinished(status) {
+            items[idx].finishedAt = Date()
+        }
     }
 
     // MARK: - History

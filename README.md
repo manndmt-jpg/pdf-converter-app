@@ -4,6 +4,10 @@ A small native macOS app that converts PDFs into clean, structured Markdown. Bui
 
 Drop a PDF on the window or Dock icon, get a `.md` file in your output folder.
 
+![Home screen](assets/screenshot-home.png)
+
+![Converted document with markdown preview](assets/screenshot-done.png)
+
 ## Features
 
 - Drag and drop one or many PDFs, sequential queue with live progress

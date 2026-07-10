@@ -20,8 +20,8 @@ struct PDFConverterApp: App {
             ContentView()
                 .environmentObject(queue)
         }
-        .defaultSize(width: 440, height: 560)
-        .windowResizability(.contentSize)
+        .defaultSize(width: 780, height: 520)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {

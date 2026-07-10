@@ -94,7 +94,7 @@ struct Converter {
         if fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             markdown = try await convertScanned(doc: doc, sourceName: url.deletingPathExtension().lastPathComponent, progress: progress)
         } else {
-            progress("Analyzing document…", nil)
+            progress("Summarizing — one AI call for the whole document", nil)
             let userContent = "Vollständiger Dokumenttext (\(pageCount) Seiten):\n\n\(fullText)\n\n\(userPrompt)"
             let response = try await chat(system: Prompts.structuredSystem, userText: userContent)
             try Task.checkCancellation()
@@ -278,6 +278,11 @@ struct Converter {
         if clean.hasSuffix("```") { clean = String(clean.dropLast(3)) }
         clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
         if let obj = attempt(clean) { return obj }
+        // Last resort: model wrapped the JSON in prose or stray fences — take outermost braces
+        if let start = clean.firstIndex(of: "{"), let end = clean.lastIndex(of: "}"), start < end,
+           let obj = attempt(String(clean[start...end])) {
+            return obj
+        }
         return ["raw_response": text]
     }
 

@@ -1,4 +1,8 @@
-# Version 1.2
+# Version 1.3
 
-- New backend option: Google Vertex AI (EU region). Document content is processed in europe-west1 instead of going through OpenRouter. Configure in Settings with your GCP project and gcloud credentials.
-- Settings now has a provider picker: OpenRouter (default) or Vertex AI (EU)
+- Complete redesign: two-pane layout with a queue and history sidebar and a live document view
+- Markdown preview for converted documents with a one-click Copy button
+- Progress ring with page-level progress for scanned documents
+- Clearer states for waiting, confirmation, failure (with retry), and success
+- Home button to return to the drop screen
+- Fix: some conversions showed a raw JSON dump instead of formatted Markdown
