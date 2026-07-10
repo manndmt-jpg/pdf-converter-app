@@ -1,8 +1,5 @@
-# Version 1.3
+# Version 1.4
 
-- Complete redesign: two-pane layout with a queue and history sidebar and a live document view
-- Markdown preview for converted documents with a one-click Copy button
-- Progress ring with page-level progress for scanned documents
-- Clearer states for waiting, confirmation, failure (with retry), and success
-- Home button to return to the drop screen
-- Fix: some conversions showed a raw JSON dump instead of formatted Markdown
+- Preview now shows the complete converted document, not just the beginning
+- Preview text is selectable, copy any part of it directly
+- Wider default window on fresh installs

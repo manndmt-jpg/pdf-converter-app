@@ -20,7 +20,7 @@ struct PDFConverterApp: App {
             ContentView()
                 .environmentObject(queue)
         }
-        .defaultSize(width: 780, height: 520)
+        .defaultSize(width: 900, height: 560)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .appInfo) {

@@ -725,7 +725,7 @@ struct HistoryDetailView: View {
 struct SuccessView: View {
     let outputURL: URL
     let metadata: String?
-    @State private var previewLines: [String] = []
+    @State private var previewText = AttributedString("")
     @State private var copied = false
 
     var body: some View {
@@ -753,14 +753,12 @@ struct SuccessView: View {
 
     private var preview: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(previewLines.enumerated()), id: \.offset) { _, line in
-                    styledLine(line)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 18)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(previewText)
+                .lineSpacing(5)
+                .textSelection(.enabled)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(RoundedRectangle(cornerRadius: 10).fill(DS.previewBg))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(DS.hairline, lineWidth: 0.5))
@@ -781,32 +779,25 @@ struct SuccessView: View {
         }
     }
 
-    @ViewBuilder private func styledLine(_ line: String) -> some View {
-        if line.isEmpty {
-            Text(" ").font(.system(size: 11.5, design: .monospaced))
-        } else if line.hasPrefix("# ") {
-            Text(line)
-                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                .foregroundStyle(DS.textPrimary)
-                .lineSpacing(5)
-        } else if line.hasPrefix("##") {
-            Text(line)
-                .font(.system(size: 11.5, weight: .regular, design: .monospaced))
-                .foregroundStyle(DS.mdHeading)
-                .lineSpacing(5)
-        } else {
-            Text(line)
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(DS.monoBody)
-                .lineSpacing(5)
-        }
-    }
-
     private func loadPreview() {
         copied = false
         let content = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? "Could not read \(outputURL.lastPathComponent)"
-        let lines: [String] = content.components(separatedBy: "\n")
-        previewLines = Array(lines.prefix(24))
+        var result = AttributedString()
+        for (i, line) in content.components(separatedBy: "\n").enumerated() {
+            var attr = AttributedString(i == 0 ? line : "\n" + line)
+            if line.hasPrefix("# ") {
+                attr.font = .system(size: 11.5, weight: .semibold, design: .monospaced)
+                attr.foregroundColor = DS.textPrimary
+            } else if line.hasPrefix("##") {
+                attr.font = .system(size: 11.5, design: .monospaced)
+                attr.foregroundColor = DS.mdHeading
+            } else {
+                attr.font = .system(size: 11.5, design: .monospaced)
+                attr.foregroundColor = DS.monoBody
+            }
+            result += attr
+        }
+        previewText = result
     }
 
     private func copyMarkdown() {
