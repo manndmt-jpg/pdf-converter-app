@@ -38,6 +38,7 @@ struct PDFConverterApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SettingsView.applyAppearance(UserDefaults.standard.string(forKey: "appearanceOverride") ?? "system")
         // First-launch convenience: import API key from shell env if Keychain is empty
         // (works when the binary is started from a terminal).
         if Keychain.readAPIKey() == nil,

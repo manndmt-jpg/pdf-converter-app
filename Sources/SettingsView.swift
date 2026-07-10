@@ -10,6 +10,8 @@ struct SettingsView: View {
     @AppStorage("vertexRegion") private var vertexRegion = "europe-west1"
     @AppStorage("vertexCredentialsJSON") private var vertexCredentialsJSON = ""
 
+    @AppStorage("appearanceOverride") private var appearanceOverride = "system"
+
     @State private var apiKey: String = Keychain.readAPIKey() ?? ""
     @State private var keyTestResult: String?
     @State private var isTestingKey = false
@@ -71,6 +73,18 @@ struct SettingsView: View {
                     Text("Model: \(AppSettings.vertexModel) (only model deployed in \(vertexRegion))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Appearance") {
+                Picker("Theme", selection: $appearanceOverride) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: appearanceOverride) { _, newValue in
+                    Self.applyAppearance(newValue)
                 }
             }
 
@@ -143,6 +157,14 @@ struct SettingsView: View {
             } catch {
                 keyTestResult = "Failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    static func applyAppearance(_ value: String) {
+        switch value {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
         }
     }
 

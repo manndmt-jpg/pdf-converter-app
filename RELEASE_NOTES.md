@@ -1,3 +1,3 @@
-# Version 1.5
+# Version 1.6
 
-- The app now introduces itself as "PDF to MD AI Converter" (menu bar, About window, update dialogs)
+- Appearance setting: choose System, Light, or Dark for the app independent of your macOS theme (Settings, Cmd+,)
