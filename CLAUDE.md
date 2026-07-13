@@ -1,11 +1,12 @@
-# PDF Converter - Project Notes
+# PDF to MD AI Converter - Project Notes
 
 ## Overview
 
-Native macOS Dock app (SwiftUI) that converts PDFs to structured German-legal
-Markdown via Gemini 2.5 Flash on OpenRouter. GUI successor to
+Native macOS Dock app (SwiftUI, display name "PDF to MD AI Converter", bundle
+PDFConverter) that converts PDFs to structured German-legal Markdown via Gemini
+2.5 Flash (OpenRouter default, Vertex AI EU optional). GUI successor to
 `~/Projects/pdf-parser/parse_contract.py`; prompts and markdown rendering are
-ported 1:1 from there.
+ported 1:1 from there. Public repo: github.com/manndmt-jpg/pdf-converter-app.
 
 ## Build & run
 
@@ -52,7 +53,32 @@ release script signs each nested binary individually.
 - Models: gemini-2.5-flash default, gemini-2.5-pro selectable
 - Cost guard: scanned PDFs > 100 pages need inline Convert/Skip confirmation
 
+## UI (v1.3+ redesign)
+
+- Two-pane layout from claude.ai/design project 7d5e8c9c (folder
+  design_handoff_two_pane_redesign: README spec + .dc.html mocks). When adjusting
+  design, read the .dc.html mocks, not only the README.
+- `DesignTokens.swift` holds the palette (dynamic NSColor light/dark providers).
+- Appearance override (Settings): UserDefaults `appearanceOverride`
+  (system|light|dark) applied via `NSApp.appearance`; applied at launch in
+  AppDelegate and on change in SettingsView.
+- Preview (SuccessView) has a non-scrolling toolbar strip: a Formatted/Markdown
+  segmented toggle (left) + Copy (right), above a hairline; the document scrolls
+  below it as one `.textSelection(.enabled)` AttributedString Text. Mode persists
+  in UserDefaults `previewMode` (default formatted). renderFormatted does
+  proportional headings (# ... ######)/lists/inline-bold and falls back to
+  monospace for table rows and fenced code so columns align; renderRaw is the
+  monospace source view. Both renderings are cached per document.
+- Hidden title bar; root HStack ignores top safe area; sidebar 264pt with 52pt
+  traffic-light spacer.
+
 ## Gotchas
+
+- NEVER rename bundle id `com.dimitrimann.pdfconverter`, the `PDFConverter.app`
+  filename, or the repo: Sparkle feed, Keychain item, and shared links depend on
+  them. Only CFBundleDisplayName/CFBundleName carry the product name.
+- Do NOT ship a standalone release for a one-line change; fold into the next one
+  (user preference).
 
 - Scanned-page OCR goes through Gemini Vision (parity with the CLI), NOT Apple Vision
 - PDF only; the CLI's .docx support was not ported

@@ -1,3 +1,5 @@
-# Version 1.6
+# Version 1.7
 
-- Appearance setting: choose System, Light, or Dark for the app independent of your macOS theme (Settings, Cmd+,)
+- New preview toggle: switch between Formatted (rendered headings, lists, and tables) and Markdown (raw source) right above the preview. Your choice is remembered.
+- Formatted view now handles tables, code blocks, deeper headings, and numbered lists cleanly.
+- Copy always matches exactly what the preview shows.
