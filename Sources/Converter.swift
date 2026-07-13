@@ -12,6 +12,7 @@ enum ConversionError: LocalizedError {
     case network(String)
     case apiError(Int, String)
     case emptyResponse
+    case responseTruncated
     case renderFailed(Int)
     case outputWriteFailed(String)
 
@@ -32,9 +33,12 @@ enum ConversionError: LocalizedError {
         case .network(let detail):
             return "Network problem: \(detail). Check your internet connection."
         case .apiError(let code, let detail):
-            return "OpenRouter error \(code): \(detail)"
+            // Neutral wording: this fires for both OpenRouter and Vertex backends.
+            return code > 0 ? "API error \(code): \(detail)" : "AI provider error: \(detail)"
         case .emptyResponse:
             return "The model returned an empty response."
+        case .responseTruncated:
+            return "The AI returned a cut-off or incomplete answer for this document, so the result could not be assembled. Converting the same file again usually works; if it keeps failing, the PDF is unusually dense."
         case .renderFailed(let page):
             return "Could not render page \(page) as an image."
         case .outputWriteFailed(let detail):
@@ -88,18 +92,21 @@ struct Converter {
         let pageCount = doc.pageCount
         guard pageCount > 0 else { throw ConversionError.emptyPDF }
 
-        let fullText = extractText(doc: doc)
+        let pages = extractPages(doc: doc)
+        let sourceName = url.deletingPathExtension().lastPathComponent
         let markdown: String
 
-        if fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            markdown = try await convertScanned(doc: doc, sourceName: url.deletingPathExtension().lastPathComponent, progress: progress)
+        if pages.isEmpty {
+            markdown = try await convertScanned(doc: doc, sourceName: sourceName, progress: progress)
         } else {
-            progress("Summarizing — one AI call for the whole document", nil)
-            let userContent = "Vollständiger Dokumenttext (\(pageCount) Seiten):\n\n\(fullText)\n\n\(userPrompt)"
-            let response = try await chat(system: Prompts.structuredSystem, userText: userContent)
-            try Task.checkCancellation()
-            let json = Self.parseJSON(response)
-            markdown = MarkdownRenderer.render(json, sourceName: url.deletingPathExtension().lastPathComponent)
+            do {
+                markdown = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: false, progress: progress)
+            } catch ConversionError.responseTruncated where pages.count > 1 {
+                // The one-pass answer would not fit or never came back as valid JSON
+                // even after re-asks. Halve the request: smaller answers stay far from
+                // the token cap and are much less likely to contain broken JSON.
+                markdown = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: true, progress: progress)
+            }
         }
 
         progress("Saving…", nil)
@@ -107,9 +114,78 @@ struct Converter {
         return ConversionResult(outputURL: outputURL)
     }
 
+    // MARK: - Text-layer path (structured JSON, chunked when large)
+
+    private func convertTextLayer(pages: [String], pageCount: Int, sourceName: String, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> String {
+        let totalChars = pages.reduce(0) { $0 + $1.count }
+        let maxChars = forceSplit
+            ? min(DocumentChunker.maxChunkChars / 2, totalChars / 2)
+            : DocumentChunker.maxChunkChars
+        let chunks = DocumentChunker.chunk(pages: pages, maxChars: maxChars)
+        var parsed: [[String: Any]] = []
+        var openSection: String?
+        for (i, chunkText) in chunks.enumerated() {
+            if chunks.count == 1 {
+                progress("Converting the whole document in one AI call (takes a few minutes)", nil)
+            } else {
+                progress("Converting part \(i + 1)/\(chunks.count)", Double(i) / Double(chunks.count))
+            }
+            var userContent = "Vollständiger Dokumenttext (\(pageCount) Seiten):\n\n\(chunkText)\n\n\(userPrompt)"
+            if chunks.count > 1 {
+                var hint = "Hinweis: Dies ist Teil \(i + 1) von \(chunks.count) eines längeren Dokuments. Extrahiere nur die Abschnitte, die in diesem Teil enthalten sind."
+                // A chunk usually starts mid-section (its heading sits in the previous
+                // chunk). Give the model that heading so the continuation comes back
+                // under the SAME id and the merge fold can re-join the halves.
+                if let openSection {
+                    hint += " Der vorherige Teil endete innerhalb des Abschnitts \(openSection). NUR falls dieser Teil mit der Fortsetzung dieses Abschnitts beginnt (Text ohne eigene Abschnittsüberschrift), gib diese Fortsetzung als ersten Abschnitt mit exakt derselben id und demselben Titel aus. Beginnt dieser Teil dagegen mit einer neuen Abschnittsüberschrift, verwende deren eigene Nummerierung."
+                }
+                userContent = "Dokumenttext, Teil \(i + 1) von \(chunks.count) (insgesamt \(pageCount) Seiten):\n\n\(chunkText)\n\n\(userPrompt)\n\n\(hint)"
+            }
+            var json: [String: Any] = [:]
+            var parseFailures = 0
+            while true {
+                let response = try await chat(system: Prompts.structuredSystem, userText: userContent, maxAttempts: 5)
+                try Task.checkCancellation()
+                json = Self.parseJSON(response)
+                if json["raw_response"] == nil { break }
+                // The answer arrived complete (chat() already screened out mid-stream
+                // errors and token-cap truncation) but is not valid JSON. Sampling is
+                // nondeterministic, so one full re-ask usually yields a clean answer.
+                parseFailures += 1
+                DebugLog.dump("unparseable-part\(i + 1)-try\(parseFailures)", response)
+                guard parseFailures < 2 else { throw ConversionError.responseTruncated }
+                progress(chunks.count == 1
+                    ? "Answer was not machine-readable, asking again"
+                    : "Part \(i + 1)/\(chunks.count): answer was not machine-readable, asking again",
+                    chunks.count == 1 ? nil : Double(i) / Double(chunks.count))
+            }
+            parsed.append(json)
+            if let last = (json["sections"] as? [[String: Any]])?.last {
+                let label = "\((last["id"] as? String) ?? "") \((last["title"] as? String) ?? "")"
+                    .trimmingCharacters(in: .whitespaces)
+                // A header-less trailing section means we are still inside the
+                // previously known section, so keep that hint rather than clearing it.
+                if !label.isEmpty {
+                    openSection = "\"\(label)\""
+                }
+            }
+        }
+        let merged = parsed.count == 1 ? parsed[0] : DocumentChunker.merge(parsed)
+        let markdown = MarkdownRenderer.render(merged, sourceName: sourceName)
+        // The prompt forbids summarizing, so a faithful answer is roughly as long as
+        // the source (measured: 126K chars rendered from 125.7K source). A drastically
+        // shorter answer means the model silently skipped content (observed on Vertex
+        // with thinking on: 20K of 126K). Reject it so the split-fallback retries.
+        if markdown.count < totalChars * 2 / 5 {
+            DebugLog.dump("incomplete-answer", markdown)
+            throw ConversionError.responseTruncated
+        }
+        return markdown
+    }
+
     // MARK: - Text extraction
 
-    private func extractText(doc: PDFDocument) -> String {
+    private func extractPages(doc: PDFDocument) -> [String] {
         var parts: [String] = []
         for i in 0..<doc.pageCount {
             guard let text = doc.page(at: i)?.string,
@@ -117,7 +193,7 @@ struct Converter {
             else { continue }
             parts.append("--- Seite \(i + 1) von \(doc.pageCount) ---\n\(text)")
         }
-        return parts.joined(separator: "\n\n")
+        return parts
     }
 
     // MARK: - Scanned path (per-page Gemini Vision OCR)
@@ -130,7 +206,7 @@ struct Converter {
             guard let page = doc.page(at: i), let png = Self.renderPNG(page: page) else {
                 throw ConversionError.renderFailed(i + 1)
             }
-            let pageMD = try await chat(system: Prompts.visionSystem, userText: userPrompt, pngBase64Images: [png.base64EncodedString()])
+            let pageMD = try await chat(system: Prompts.visionSystem, userText: userPrompt, pngBase64Images: [png.base64EncodedString()], allowTruncated: true)
             pagesMD.append("## Seite \(i + 1)\n\n\(pageMD.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         return "# \(sourceName)\n\n" + pagesMD.joined(separator: "\n\n---\n\n")
@@ -149,12 +225,39 @@ struct Converter {
 
     // MARK: - API
 
-    private func chat(system: String, userText: String, pngBase64Images: [String] = [], maxAttempts: Int = 3) async throws -> String {
+    // Fallback for Gemini capacity storms (rate limits, provider failures) on the
+    // OpenRouter backend: a different model family draws from a different capacity
+    // pool. Text-only; the vision/OCR path stays on Gemini. Verified against the
+    // structured prompt on a full 17-page doc (returns fenced JSON; parseJSON strips it).
+    private static let fallbackTextModel = "mistralai/mistral-large-2512"
+
+    private static func isWorthFallback(_ error: Error) -> Bool {
+        switch error {
+        case ConversionError.emptyResponse:
+            return true
+        case ConversionError.apiError(let code, _):
+            return code == 429 || code >= 500 || code == 0
+        default:
+            return false
+        }
+    }
+
+    private func chat(system: String, userText: String, pngBase64Images: [String] = [], maxAttempts: Int = 3, allowTruncated: Bool = false) async throws -> String {
+        do {
+            return try await chatLoop(model: model, system: system, userText: userText, pngBase64Images: pngBase64Images, maxAttempts: maxAttempts, allowTruncated: allowTruncated)
+        } catch let error where backend == .openrouter && pngBase64Images.isEmpty
+            && model != Self.fallbackTextModel && Self.isWorthFallback(error) {
+            return try await chatLoop(model: Self.fallbackTextModel, system: system, userText: userText, pngBase64Images: [], maxAttempts: 2, allowTruncated: allowTruncated)
+        }
+    }
+
+    private func chatLoop(model: String, system: String, userText: String, pngBase64Images: [String], maxAttempts: Int, allowTruncated: Bool) async throws -> String {
         var lastError: Error = ConversionError.network("unknown")
+        var rateLimited = false
         for attempt in 1...maxAttempts {
             try Task.checkCancellation()
             do {
-                let request = try await buildRequest(system: system, userText: userText, pngBase64Images: pngBase64Images)
+                let request = try await buildRequest(model: model, system: system, userText: userText, pngBase64Images: pngBase64Images)
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let http = response as? HTTPURLResponse else {
                     throw ConversionError.network("no HTTP response")
@@ -163,13 +266,46 @@ struct Converter {
                     let detail = String(data: data, encoding: .utf8)?.prefix(300) ?? ""
                     // 4xx won't get better on retry; 5xx / 429 might
                     if http.statusCode >= 500 || http.statusCode == 429, attempt < maxAttempts {
+                        rateLimited = rateLimited || http.statusCode == 429
                         throw RetryableError(underlying: ConversionError.apiError(http.statusCode, String(detail)))
                     }
                     throw ConversionError.apiError(http.statusCode, String(detail))
                 }
-                guard let content = Self.extractContent(from: data, backend: backend), !content.isEmpty
-                else { throw ConversionError.emptyResponse }
-                return content
+                let outcome = backend == .openrouter
+                    ? APIResponseParser.openRouter(data)
+                    : APIResponseParser.vertex(data)
+                switch outcome {
+                case .success(let content):
+                    return content
+                case .truncated(let partial):
+                    // More tokens won't appear on retry; the chunker sizes requests to
+                    // avoid this. The per-page OCR path keeps the partial page (losing
+                    // the whole scanned doc over one dense page is worse); the
+                    // structured path must fail because partial JSON is unusable.
+                    if allowTruncated, !partial.isEmpty {
+                        return partial + "\n\n[Transkription abgeschnitten]"
+                    }
+                    DebugLog.dump("hit-token-cap", partial)
+                    throw ConversionError.responseTruncated
+                case .providerError(let code, let message, let transient):
+                    // Providers fail mid-stream behind a 200 (observed: Google 429
+                    // injected into the SSE stream after ~40K chars). Retry those;
+                    // deterministic refusals (SAFETY blocks) fail immediately.
+                    let underlying = ConversionError.apiError(code, message)
+                    if transient, attempt < maxAttempts {
+                        rateLimited = rateLimited || code == 429
+                        throw RetryableError(underlying: underlying)
+                    }
+                    throw underlying
+                case .empty:
+                    // Flaky providers occasionally return a well-formed body with no
+                    // content; treat as transient and keep the body for forensics.
+                    DebugLog.dump("empty-response", String(data: data, encoding: .utf8) ?? "<non-utf8, \(data.count) bytes>")
+                    if attempt < maxAttempts {
+                        throw RetryableError(underlying: ConversionError.emptyResponse)
+                    }
+                    throw ConversionError.emptyResponse
+                }
             } catch let error as RetryableError {
                 lastError = error.underlying
             } catch let error as URLError where error.code != .cancelled {
@@ -178,13 +314,16 @@ struct Converter {
                 throw error
             }
             if attempt < maxAttempts {
-                try await Task.sleep(nanoseconds: UInt64(attempt) * 3_000_000_000)
+                // Rate limits persist for tens of seconds; short backoffs just burn
+                // attempts into the same limit window.
+                let seconds = rateLimited ? UInt64(attempt) * 15 : UInt64(attempt) * 3
+                try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             }
         }
         throw lastError
     }
 
-    private func buildRequest(system: String, userText: String, pngBase64Images: [String]) async throws -> URLRequest {
+    private func buildRequest(model: String, system: String, userText: String, pngBase64Images: [String]) async throws -> URLRequest {
         switch backend {
         case .openrouter:
             guard !apiKey.isEmpty else { throw ConversionError.noAPIKey }
@@ -204,14 +343,17 @@ struct Converter {
                     ["role": "system", "content": system],
                     ["role": "user", "content": userContent],
                 ],
-                "max_tokens": 32768,
+                "max_tokens": 65536,
             ]
             var request = URLRequest(url: Self.openRouterURL)
             request.httpMethod = "POST"
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            request.timeoutInterval = 600
+            // Non-streaming call: no bytes arrive until the full answer is generated,
+            // so this idle timeout is effectively the total budget. Mistral needed 13
+            // minutes for a full 17-page structured answer (measured); Gemini ~2.
+            request.timeoutInterval = 1500
             return request
 
         case .vertex:
@@ -230,33 +372,26 @@ struct Converter {
             let body: [String: Any] = [
                 "systemInstruction": ["parts": [["text": system]]],
                 "contents": [["role": "user", "parts": parts]],
-                "generationConfig": ["maxOutputTokens": 32768],
+                "generationConfig": [
+                    "maxOutputTokens": 65536,
+                    // Vertex enables dynamic thinking by default and the model then
+                    // compresses: a 17-page doc came back as a 20K-char skeleton of a
+                    // 126K-char answer. The OpenRouter route runs with reasoning off
+                    // (reasoning_tokens 0) and returns the full text, so pin thinking
+                    // off here too. gemini-2.5-flash accepts a budget of 0.
+                    "thinkingConfig": ["thinkingBudget": 0],
+                ] as [String: Any],
             ]
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            request.timeoutInterval = 600
+            // Non-streaming call: no bytes arrive until the full answer is generated,
+            // so this idle timeout is effectively the total budget. Mistral needed 13
+            // minutes for a full 17-page structured answer (measured); Gemini ~2.
+            request.timeoutInterval = 1500
             return request
-        }
-    }
-
-    private static func extractContent(from data: Data, backend: Backend) -> String? {
-        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
-        switch backend {
-        case .openrouter:
-            guard let choices = obj["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any]
-            else { return nil }
-            return message["content"] as? String
-        case .vertex:
-            guard let candidates = obj["candidates"] as? [[String: Any]],
-                  let content = candidates.first?["content"] as? [String: Any],
-                  let parts = content["parts"] as? [[String: Any]]
-            else { return nil }
-            let text = parts.compactMap { $0["text"] as? String }.joined()
-            return text.isEmpty ? nil : text
         }
     }
 

@@ -147,14 +147,16 @@ struct SidebarView: View {
                                 .onTapGesture { toggle(.item(item.id)) }
                         }
                         ForEach(todayHistory) { entry in
-                            HistoryRowView(entry: entry, isSelected: selection == .history(entry.outputPath))
+                            HistoryRowView(entry: entry, isSelected: selection == .history(entry.outputPath),
+                                           onRemove: { removeHistory(entry) })
                                 .onTapGesture { toggle(.history(entry.outputPath)) }
                         }
                     }
                     if !olderHistory.isEmpty {
                         sectionHeader("Recent").padding(.top, 14)
                         ForEach(olderHistory) { entry in
-                            HistoryRowView(entry: entry, isSelected: selection == .history(entry.outputPath))
+                            HistoryRowView(entry: entry, isSelected: selection == .history(entry.outputPath),
+                                           onRemove: { removeHistory(entry) })
                                 .onTapGesture { toggle(.history(entry.outputPath)) }
                         }
                     }
@@ -178,6 +180,11 @@ struct SidebarView: View {
 
     private func toggle(_ target: ContentView.SidebarSelection) {
         selection = (selection == target) ? nil : target
+    }
+
+    private func removeHistory(_ entry: HistoryEntry) {
+        if selection == .history(entry.outputPath) { selection = nil }
+        queue.removeHistory(entry.outputPath)
     }
 
     private var activeItems: [QueueItem] { queue.items.filter { !$0.isFinished } }
@@ -315,6 +322,7 @@ struct QueueRowView: View {
 struct HistoryRowView: View {
     let entry: HistoryEntry
     let isSelected: Bool
+    var onRemove: () -> Void = {}
     @State private var hovering = false
 
     var body: some View {
@@ -329,9 +337,21 @@ struct HistoryRowView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
-            Text(entry.date, style: .relative)
-                .font(.system(size: 10.5))
-                .foregroundStyle(DS.textQuaternary)
+            if hovering {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(DS.textTertiary)
+                        .frame(width: 16, height: 16)
+                        .background(Circle().fill(DS.pillBg))
+                }
+                .buttonStyle(.plain)
+                .help("Remove from list")
+            } else {
+                Text(entry.date, style: .relative)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(DS.textQuaternary)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -499,9 +519,10 @@ struct ItemDetailView: View {
 
     private var successMetadata: String? {
         var parts: [String] = []
-        if let started = item.startedAt {
-            let secs = Int(Date().timeIntervalSince(started))
-            parts.append("Converted in \(secs / 60):\(String(format: "%02d", secs % 60))")
+        // item.duration uses finishedAt; computing from Date() here inflated the
+        // number whenever the success view was rendered again later.
+        if let duration = item.duration {
+            parts.append("Converted in \(duration)")
         }
         if let pill = item.pagePill { parts.append(pill) }
         parts.append(AppSettings.current().backend == .vertex
@@ -544,22 +565,26 @@ struct ConvertingView: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(DS.textQuaternary)
             }
-            Text(metadata)
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(DS.textQuaternary)
+            // TimelineView re-renders every second; without it the elapsed time was
+            // computed once per status change and froze at "0:00".
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(metadata(now: context.date))
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(DS.textQuaternary)
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity)
     }
 
-    private var metadata: String {
+    private func metadata(now: Date) -> String {
         let settings = AppSettings.current()
         let model = settings.backend == .vertex
             ? AppSettings.vertexModel : settings.model.replacingOccurrences(of: "google/", with: "")
         var parts = [model]
         if let started = item.startedAt {
-            let secs = Int(Date().timeIntervalSince(started))
-            parts.append("started \(secs / 60):\(String(format: "%02d", secs % 60)) ago")
+            let secs = max(0, Int(now.timeIntervalSince(started)))
+            parts.append("running \(secs / 60):\(String(format: "%02d", secs % 60))")
         }
         parts.append("→ \(settings.outputFolder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))")
         return parts.joined(separator: " · ")
@@ -732,7 +757,13 @@ struct SuccessView: View {
     @State private var formattedCache: AttributedString?
     @State private var rawCache: AttributedString?
     @State private var copied = false
+    @State private var previewTruncated = false
     @AppStorage("previewMode") private var mode = PreviewMode.formatted.rawValue
+
+    // A very large file rendered as one selectable AttributedString hangs the main
+    // thread, so the on-screen preview is capped. Copy and Open Markdown use the full file.
+    private static let previewLineCap = 600
+    private static let previewCharCap = 60_000
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -777,6 +808,18 @@ struct SuccessView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 18)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if previewTruncated {
+                Rectangle().fill(DS.hairline).frame(height: 1)
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                    Text("Long document, showing the first \(Self.previewLineCap) lines. Copy and Open Markdown use the full file.")
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(DS.textTertiary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .background(DS.previewBg)
@@ -836,15 +879,33 @@ struct SuccessView: View {
 
     // Render each mode at most once per document; toggling just swaps the cache.
     private func rebuild() {
+        let (slice, truncated) = Self.capForPreview(rawContent)
+        previewTruncated = truncated
         if mode == PreviewMode.raw.rawValue {
-            let text = rawCache ?? Self.renderRaw(rawContent)
+            let text = rawCache ?? Self.renderRaw(slice)
             rawCache = text
             previewText = text
         } else {
-            let text = formattedCache ?? Self.renderFormatted(rawContent)
+            let text = formattedCache ?? Self.renderFormatted(slice)
             formattedCache = text
             previewText = text
         }
+    }
+
+    // Bound the rendered text so oversized documents can't hang the UI thread.
+    private static func capForPreview(_ content: String) -> (String, Bool) {
+        var slice = content
+        var truncated = false
+        if slice.count > previewCharCap {
+            slice = String(slice.prefix(previewCharCap))
+            truncated = true
+        }
+        let lines = slice.components(separatedBy: "\n")
+        if lines.count > previewLineCap {
+            slice = lines.prefix(previewLineCap).joined(separator: "\n")
+            truncated = true
+        }
+        return (slice, truncated)
     }
 
     // Raw Markdown source: monospace, light heading tint (original preview).

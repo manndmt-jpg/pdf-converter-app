@@ -52,6 +52,20 @@ release script signs each nested binary individually.
 - Output: `~/Documents/PDF-Converted/` (changeable in Settings)
 - Models: gemini-2.5-flash default, gemini-2.5-pro selectable
 - Cost guard: scanned PDFs > 100 pages need inline Convert/Skip confirmation
+- Token cap: `max_tokens`/`maxOutputTokens` = 65536 (both backends). The text-layer
+  path asks for the WHOLE document back as structured JSON, so output size ~= document
+  size (measured: 17-page AHB = ~36K output tokens). Docs > ~160K chars are chunked
+  (DocumentChunker) and merged; a cut-off/unparseable/short answer triggers a re-ask,
+  then an automatic split-in-halves retry, then `.responseTruncated`.
+- OpenRouter can embed provider failures inside a 200-OK response (choices[0].error,
+  e.g. Google 429 injected mid-stream). APIResponseParser detects these; transient ones
+  retry with rate-limit-aware backoff (15s*attempt). NEVER judge success by HTTP status.
+- Vertex: `thinkingBudget: 0` is REQUIRED. With default dynamic thinking the model
+  summarizes a 126K-char answer into a 20K skeleton despite the do-not-summarize prompt.
+- OpenRouter text-path falls back to `mistralai/mistral-large-2512` when Gemini
+  exhausts retries on 429/5xx/empty. Mistral is slow on big docs (13 min for 17 pages,
+  measured), hence request timeoutInterval 1500s. Vision/OCR stays Gemini-only.
+- Failed/unusable model answers are dumped to `~/Library/Logs/PDFConverter/`.
 
 ## UI (v1.3+ redesign)
 
@@ -69,6 +83,11 @@ release script signs each nested binary individually.
   proportional headings (# ... ######)/lists/inline-bold and falls back to
   monospace for table rows and fenced code so columns align; renderRaw is the
   monospace source view. Both renderings are cached per document.
+- Preview render is CAPPED to the first 600 lines / 60KB (SuccessView.capForPreview)
+  with a truncation notice, because one huge selectable AttributedString Text hangs
+  the main thread. Copy and Open Markdown always use the full file.
+- History rows (sidebar) have a per-row ✕ remove on hover -> ConversionQueue
+  .removeHistory(id); selection clears if the removed row was open.
 - Hidden title bar; root HStack ignores top safe area; sidebar 264pt with 52pt
   traffic-light spacer.
 
@@ -80,6 +99,9 @@ release script signs each nested binary individually.
 - Do NOT ship a standalone release for a one-line change; fold into the next one
   (user preference).
 
+- Code fixes do NOT retroactively rewrite already-saved `.md` files. A doc that
+  converted badly stays bad on disk until the user RE-DROPS the PDF (save() only runs
+  on a successful conversion and overwrites by output filename).
 - Scanned-page OCR goes through Gemini Vision (parity with the CLI), NOT Apple Vision
 - PDF only; the CLI's .docx support was not ported
 - Relaunch the app after code changes (rebuild does not hot-reload)

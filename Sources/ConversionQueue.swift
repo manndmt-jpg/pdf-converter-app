@@ -233,6 +233,15 @@ final class ConversionQueue: ObservableObject {
         history.removeAll { $0.outputPath == outputURL.path }
         history.insert(HistoryEntry(name: name, outputPath: outputURL.path, date: Date()), at: 0)
         history = Array(history.prefix(8))
+        saveHistory()
+    }
+
+    func removeHistory(_ id: String) {
+        history.removeAll { $0.id == id }
+        saveHistory()
+    }
+
+    private func saveHistory() {
         if let data = try? JSONEncoder().encode(history) {
             UserDefaults.standard.set(data, forKey: Self.historyKey)
         }
