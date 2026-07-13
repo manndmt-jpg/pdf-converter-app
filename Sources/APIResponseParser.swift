@@ -34,6 +34,77 @@ enum APIResponseParser {
         return content.isEmpty ? .empty : .success(content)
     }
 
+    // Parses the model's structured answer, tolerating the usual LLM sins: markdown
+    // fences, prose around the JSON, and raw control characters inside string values
+    // (Gemini intermittently emits literal newlines instead of \n; strict JSON parsers
+    // reject the whole answer over one such character).
+    static func parseJSON(_ text: String) -> [String: Any] {
+        func attempt(_ s: String) -> [String: Any]? {
+            guard let data = s.data(using: .utf8) else { return nil }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        if let obj = attempt(text) { return obj }
+        var clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.hasPrefix("```json") { clean = String(clean.dropFirst(7)) }
+        if clean.hasPrefix("```") { clean = String(clean.dropFirst(3)) }
+        if clean.hasSuffix("```") { clean = String(clean.dropLast(3)) }
+        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let obj = attempt(clean) { return obj }
+        if let obj = attempt(escapeControlCharsInStrings(clean)) { return obj }
+        // Last resort: model wrapped the JSON in prose or stray fences — take outermost
+        // braces. Slice BEFORE repairing: an odd quote in surrounding prose would flip
+        // the repairer's in-string tracking and corrupt structural whitespace.
+        if let start = clean.firstIndex(of: "{"), let end = clean.lastIndex(of: "}"), start < end {
+            let slice = String(clean[start...end])
+            if let obj = attempt(slice) { return obj }
+            if let obj = attempt(escapeControlCharsInStrings(slice)) { return obj }
+        }
+        return ["raw_response": text]
+    }
+
+    // Escapes raw control characters that occur INSIDE JSON string literals, leaving
+    // structural whitespace between tokens untouched. Tracks escape state so \" and
+    // \\ sequences do not confuse the in-string detection.
+    static func escapeControlCharsInStrings(_ s: String) -> String {
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(s.unicodeScalars.count)
+        var inString = false
+        var escaped = false
+        for scalar in s.unicodeScalars {
+            if inString {
+                if escaped {
+                    escaped = false
+                    out.append(scalar)
+                    continue
+                }
+                switch scalar {
+                case "\\":
+                    escaped = true
+                    out.append(scalar)
+                case "\"":
+                    inString = false
+                    out.append(scalar)
+                case "\n":
+                    out.append(contentsOf: "\\n".unicodeScalars)
+                case "\r":
+                    out.append(contentsOf: "\\r".unicodeScalars)
+                case "\t":
+                    out.append(contentsOf: "\\t".unicodeScalars)
+                default:
+                    if scalar.value < 0x20 {
+                        out.append(contentsOf: String(format: "\\u%04x", scalar.value).unicodeScalars)
+                    } else {
+                        out.append(scalar)
+                    }
+                }
+            } else {
+                if scalar == "\"" { inString = true }
+                out.append(scalar)
+            }
+        }
+        return String(out)
+    }
+
     static func vertex(_ data: Data) -> Outcome {
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let candidates = obj["candidates"] as? [[String: Any]],

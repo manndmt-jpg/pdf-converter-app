@@ -402,23 +402,7 @@ struct Converter {
     // MARK: - Output
 
     static func parseJSON(_ text: String) -> [String: Any] {
-        func attempt(_ s: String) -> [String: Any]? {
-            guard let data = s.data(using: .utf8) else { return nil }
-            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        }
-        if let obj = attempt(text) { return obj }
-        var clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if clean.hasPrefix("```json") { clean = String(clean.dropFirst(7)) }
-        if clean.hasPrefix("```") { clean = String(clean.dropFirst(3)) }
-        if clean.hasSuffix("```") { clean = String(clean.dropLast(3)) }
-        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let obj = attempt(clean) { return obj }
-        // Last resort: model wrapped the JSON in prose or stray fences — take outermost braces
-        if let start = clean.firstIndex(of: "{"), let end = clean.lastIndex(of: "}"), start < end,
-           let obj = attempt(String(clean[start...end])) {
-            return obj
-        }
-        return ["raw_response": text]
+        APIResponseParser.parseJSON(text)
     }
 
     private func save(markdown: String, sourceURL: URL) throws -> URL {
