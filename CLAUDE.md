@@ -48,7 +48,9 @@ release script signs each nested binary individually.
   artifacts. Same standalone-compilable rule.
 - `DebugLog.swift` - dumps unusable model answers to ~/Library/Logs/PDFConverter/
 - `Prompts.swift` - system prompts, verbatim from parse_contract.py
-- `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown()
+- `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown(); v1.9.1
+  added dedup (models return the same text as id AND title/content start) and
+  trailing-dot normalization on subsection ids
 - `AppSettings.swift` / `SettingsView.swift` - backend picker (OpenRouter | Vertex AI EU),
   model, prompt, output folder (UserDefaults)
 - `Keychain.swift` - OpenRouter key storage

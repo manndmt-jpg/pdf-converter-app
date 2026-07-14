@@ -30,18 +30,30 @@ enum MarkdownRenderer {
         }
 
         if let sections = data["sections"] as? [[String: Any]] {
+            // Models regularly return the same text as both id and title (or as
+            // both id and content start); printing both duplicates the heading
+            // ("## Hinweise zum Aufbau Hinweise zum Aufbau").
+            func normalized(_ s: String) -> String {
+                s.trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+            }
             for section in sections {
                 let sid = (section["id"] as? String) ?? ""
                 let title = (section["title"] as? String) ?? ""
-                lines += ["## \(sid) \(title)".trimmingCharacters(in: .whitespaces), ""]
+                let heading = normalized(title).hasPrefix(normalized(sid)) ? title : "\(sid) \(title)"
+                lines += ["## \(heading)".trimmingCharacters(in: .whitespaces), ""]
 
                 for sub in (section["subsections"] as? [[String: Any]]) ?? [] {
-                    let subID = (sub["id"] as? String) ?? ""
+                    var subID = (sub["id"] as? String) ?? ""
+                    while subID.hasSuffix(".") { subID.removeLast() }   // "6.7." would render as "6.7.."
                     let content = (sub["content"] as? String) ?? ""
-                    if !subID.isEmpty {
-                        lines.append("**\(subID).** \(content)")
-                    } else {
+                    // Textual ids ("Abschnitt 2 – ...") sometimes repeat as the
+                    // content's first line; numeric ids must keep their bold label
+                    // ("2" legitimately precedes content starting "2.500 Euro").
+                    let idIsTextual = subID.rangeOfCharacter(from: .letters) != nil
+                    if subID.isEmpty || (idIsTextual && normalized(content).hasPrefix(normalized(subID))) {
                         lines.append(content)
+                    } else {
+                        lines.append("**\(subID).** \(content)")
                     }
                     lines.append("")
                 }

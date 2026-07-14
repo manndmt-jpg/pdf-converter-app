@@ -88,6 +88,6 @@ enum ClauseAudit {
         guard !missing.isEmpty else { return nil }
         let shown = missing.prefix(10).joined(separator: ", ")
         let more = missing.count > 10 ? " and \(missing.count - 10) more" : ""
-        return "Clause number\(missing.count == 1 ? "" : "s") \(shown)\(more) appear\(missing.count == 1 ? "s" : "") in the PDF text but not in the converted result. The affected part may be incomplete — re-drop the file to convert again, or check those clauses manually."
+        return "Clause number\(missing.count == 1 ? "" : "s") \(shown)\(more) appear\(missing.count == 1 ? "s" : "") in the PDF but not in the result. The content may be missing, or it may sit under a shifted number nearby. Compare that part against the PDF, or re-drop the file to convert again."
     }
 }
