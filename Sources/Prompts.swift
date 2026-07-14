@@ -57,4 +57,15 @@ enum Prompts {
 
     static let defaultUserPrompt =
         "Extrahiere den vollständigen Inhalt dieses Dokuments, Abschnitt für Abschnitt, in der Originalstruktur."
+
+    // Focused re-extraction of one numbered clause run from page images, used by
+    // the clause audit when the text layer's number binding failed. Live-verified:
+    // this small, image-only task binds correctly where a full-document re-ask
+    // with the same images attached kept misbinding.
+    static let clauseRunSystem = """
+    Du bist ein Experte für die Extraktion deutscher Rechtsdokumente. Du erhältst \
+    Seitenbilder eines zweispaltigen PDF-Dokuments. Die Bilder sind die verbindliche \
+    Quelle: die Ziffer links neben einem Absatz ist seine Nummer. \
+    Gib NUR gültiges JSON zurück, keine Markdown-Fences.
+    """
 }

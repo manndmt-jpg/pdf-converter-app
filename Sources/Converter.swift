@@ -103,12 +103,12 @@ struct Converter {
             result = (try await convertScanned(doc: doc, sourceName: sourceName, progress: progress), nil)
         } else {
             do {
-                result = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: false, progress: progress)
+                result = try await convertTextLayer(pages: pages, pageCount: pageCount, doc: doc, sourceName: sourceName, forceSplit: false, progress: progress)
             } catch ConversionError.responseTruncated where pages.count > 1 {
                 // The one-pass answer would not fit or never came back as valid JSON
                 // even after re-asks. Halve the request: smaller answers stay far from
                 // the token cap and are much less likely to contain broken JSON.
-                result = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: true, progress: progress)
+                result = try await convertTextLayer(pages: pages, pageCount: pageCount, doc: doc, sourceName: sourceName, forceSplit: true, progress: progress)
             }
         }
 
@@ -119,14 +119,13 @@ struct Converter {
 
     // MARK: - Text-layer path (structured JSON, chunked when large)
 
-    private func convertTextLayer(pages: [String], pageCount: Int, sourceName: String, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> (markdown: String, warning: String?) {
+    private func convertTextLayer(pages: [String], pageCount: Int, doc: PDFDocument, sourceName: String, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> (markdown: String, warning: String?) {
         let totalChars = pages.reduce(0) { $0 + $1.count }
         let maxChars = forceSplit
             ? min(DocumentChunker.maxChunkChars / 2, totalChars / 2)
             : DocumentChunker.maxChunkChars
         let chunks = DocumentChunker.chunk(pages: pages, maxChars: maxChars)
         var parsed: [[String: Any]] = []
-        var userContents: [String] = []   // kept verbatim for the clause-audit retry
         var openSection: String?
         for (i, chunkText) in chunks.enumerated() {
             if chunks.count == 1 {
@@ -145,7 +144,6 @@ struct Converter {
                 }
                 userContent = "Dokumenttext, Teil \(i + 1) von \(chunks.count) (insgesamt \(pageCount) Seiten):\n\n\(chunkText)\n\n\(userPrompt)\n\n\(hint)"
             }
-            userContents.append(userContent)
             var json: [String: Any] = [:]
             var parseFailures = 0
             while true {
@@ -187,27 +185,63 @@ struct Converter {
         }
 
         // Clause audit: an answer can pass the length guard and still be missing a
-        // small run of clauses (observed live: 6.15.2.4-6.15.2.6 dropped from an
-        // otherwise complete answer). Sampling is nondeterministic, so re-asking the
-        // affected chunk once usually recovers them; whatever remains missing after
-        // that is surfaced to the user instead of silently shipping a hole.
+        // small run of clauses. Two observed causes: nondeterministic drops
+        // (6.15.2.4-6.15.2.6 gone from an otherwise complete answer) and misbound
+        // numbering on two-column PDFs whose text layer decouples clause numbers
+        // from their paragraphs (8.6/8.7 fused and shifted). Text-only re-asks
+        // reproduce the bad guess, and a full re-ask with images attached STILL
+        // misbound in a live test. What works (live-verified): a small, focused
+        // extraction of ONLY the affected numbered run from the page images, then
+        // splicing that run into the answer by content match. Whatever is still
+        // missing afterwards is surfaced to the user instead of silently shipped.
         var missing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: markdown)
         if !missing.isEmpty, missing.count <= ClauseAudit.retryThreshold {
-            progress("Answer may be missing clause \(missing[0]) — asking again", nil)
-            var retried = parsed
-            var didRetry = false
-            for (i, chunkText) in chunks.enumerated() {
-                let chunkIds = ClauseAudit.ids(in: chunkText)
-                guard missing.contains(where: { chunkIds.contains($0) }) else { continue }
+            progress("Numbering unclear around clause \(missing[0]), re-reading the affected pages", nil)
+            var currentMerged = merged
+            let runs = Dictionary(grouping: missing) { $0.split(separator: ".").first.map(String.init) ?? $0 }
+            for (prefix, runMissing) in runs.sorted(by: { (Int($0.key) ?? 0) < (Int($1.key) ?? 0) }).prefix(3) {
+                let images = ClauseAudit.pdfPageNumbers(missing: runMissing, pageTexts: pages)
+                    .compactMap { doc.page(at: $0 - 1) }
+                    .compactMap { Self.renderPNG(page: $0, dpi: 200) }
+                    .map { $0.base64EncodedString() }
+                guard !images.isEmpty else { continue }
+                let ask = """
+                Auf den angehängten Seitenbildern steht die Ziffer\(runMissing.count == 1 ? "" : "n") \(runMissing.joined(separator: ", ")) (Hauptziffer \(prefix)). \
+                Transkribiere alle AUF DEN BILDERN SICHTBAREN Ziffern der Hauptziffer \(prefix) (einschließlich \(runMissing.joined(separator: ", "))), jede mit vollem Wortlaut, in der Reihenfolge der Bilder. \
+                Lasse Ziffern weg, die nicht auf den Bildern stehen. \
+                Nicht nummerierte Absätze gehören zum Inhalt der davorstehenden Ziffer. \
+                Format: {"subsections": [{"id": "\(prefix).1", "content": "..."}]}
+                """
                 do {
-                    let response = try await chat(system: Prompts.structuredSystem, userText: userContents[i], maxAttempts: 5)
+                    let response = try await chat(system: Prompts.clauseRunSystem, userText: ask, pngBase64Images: images, maxAttempts: 3)
                     try Task.checkCancellation()
                     let json = Self.parseJSON(response)
-                    if json["raw_response"] == nil {
-                        retried[i] = json
-                        didRetry = true
-                    } else {
-                        DebugLog.dump("audit-retry-unparseable-part\(i + 1)", response)
+                    guard let rawRun = json["subsections"] as? [[String: Any]],
+                          let run = ClauseAudit.sanitizeRun(rawRun, prefix: prefix) else {
+                        DebugLog.dump("audit-run-unusable-\(prefix)", response)
+                        continue
+                    }
+                    let runIds = ClauseAudit.ids(in: run.compactMap { $0["id"] as? String }.joined(separator: " "))
+                    guard runMissing.allSatisfy({ runIds.contains($0) }) else {
+                        DebugLog.dump("audit-run-incomplete-\(prefix)", response)
+                        continue
+                    }
+                    if let sections = currentMerged["sections"] as? [[String: Any]],
+                       let spliced = ClauseAudit.splice(run: run, intoSections: sections, runPrefix: prefix) {
+                        var candidate = currentMerged
+                        candidate["sections"] = spliced
+                        let newMarkdown = MarkdownRenderer.render(candidate, sourceName: sourceName)
+                        let newMissing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: newMarkdown)
+                        // Adopt each run's splice on its own merits: one failed
+                        // splice must not poison another run's successful fix, and
+                        // the length guard keeps a shrunken answer from winning.
+                        if newMissing.count < missing.count, newMarkdown.count >= totalChars * 2 / 5 {
+                            currentMerged = candidate
+                            markdown = newMarkdown
+                            missing = newMissing
+                        } else {
+                            DebugLog.dump("audit-splice-rejected-\(prefix)", newMarkdown)
+                        }
                     }
                 } catch is CancellationError {
                     throw CancellationError()
@@ -216,18 +250,7 @@ struct Converter {
                 } catch {
                     // The first answer is already usable; a failed audit retry must
                     // not sink the conversion.
-                    DebugLog.dump("audit-retry-failed-part\(i + 1)", String(describing: error))
-                }
-            }
-            if didRetry {
-                let newMerged = retried.count == 1 ? retried[0] : DocumentChunker.merge(retried)
-                let newMarkdown = MarkdownRenderer.render(newMerged, sourceName: sourceName)
-                let newMissing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: newMarkdown)
-                // Adopt the retry only when it is strictly better; the length guard
-                // applies to it too so a short-but-id-complete answer cannot win.
-                if newMissing.count < missing.count, newMarkdown.count >= totalChars * 2 / 5 {
-                    markdown = newMarkdown
-                    missing = newMissing
+                    DebugLog.dump("audit-run-failed-\(prefix)", String(describing: error))
                 }
             }
         }

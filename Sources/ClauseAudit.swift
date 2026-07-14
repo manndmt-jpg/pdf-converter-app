@@ -83,6 +83,134 @@ enum ClauseAudit {
         return false
     }
 
+    // PDF page numbers (1-based) whose text mentions one of the missing ids,
+    // each with its successor page (a clause's number can sit at the end of a
+    // column while its body flows onto the next page). Capped: page images are
+    // ~1 MB each and the re-ask must stay well under request size limits.
+    static let maxRetryImages = 4
+
+    static func pdfPageNumbers(missing: [String], pageTexts: [String]) -> [Int] {
+        // The table of contents repeats most clause numbers, so TOC pages would
+        // fill the image cap before the body pages the extraction actually
+        // needs. Prefer non-TOC pages; fall back to all pages only when the ids
+        // appear nowhere else.
+        let preferred = collectPages(missing: missing, pageTexts: pageTexts, skipTOC: true)
+        return preferred.isEmpty ? collectPages(missing: missing, pageTexts: pageTexts, skipTOC: false) : preferred
+    }
+
+    private static func collectPages(missing: [String], pageTexts: [String], skipTOC: Bool) -> [Int] {
+        let missingSet = Set(missing)
+        var result: [Int] = []
+        for (i, text) in pageTexts.enumerated() where !ids(in: text).isDisjoint(with: missingSet) {
+            if skipTOC, text.localizedCaseInsensitiveContains("Inhaltsverzeichnis") { continue }
+            for candidate in [pageNumber(fromMarker: text),
+                              i + 1 < pageTexts.count ? pageNumber(fromMarker: pageTexts[i + 1]) : nil] {
+                if let n = candidate, !result.contains(n), result.count < maxRetryImages {
+                    result.append(n)
+                }
+            }
+        }
+        return result.sorted()
+    }
+
+    // Defends the splice against a sloppy vision answer: drops items with empty
+    // id/content or a foreign top-level number (page images can show the next
+    // section too), rejects the whole run on duplicate ids. Returns nil when
+    // what remains is not a usable run.
+    static func sanitizeRun(_ run: [[String: Any]], prefix: String) -> [[String: Any]]? {
+        let cleaned = run.filter {
+            firstComponent($0["id"] as? String) == prefix
+                && !normId($0["id"] as? String).isEmpty
+                && !(($0["content"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let ids = cleaned.map { normId($0["id"] as? String) }
+        guard cleaned.count >= 2, Set(ids).count == ids.count else { return nil }
+        return cleaned
+    }
+
+    // Parses the "--- Seite N von M ---" header Converter.extractPages prepends.
+    // Needed because empty PDF pages are skipped: the array index of a page text
+    // is not its PDF page number.
+    static func pageNumber(fromMarker text: String) -> Int? {
+        guard text.hasPrefix("--- Seite ") else { return nil }
+        return Int(text.dropFirst("--- Seite ".count).prefix(while: { $0.isNumber }))
+    }
+
+    // Replaces a misbound clause run in the parsed answer with the
+    // vision-corrected one. The window to replace is found by CONTENT overlap,
+    // not by id (the ids are exactly what is wrong), and constrained to a
+    // contiguous block of subsections sharing the run's top-level number, so a
+    // document with several "1.x" runs (one per Abschnitt) splices the right
+    // one. Within that block, only the sub-range whose contents the run
+    // actually matched is replaced: the run comes from a page-capped image
+    // extraction and may cover just a slice of a wide section (all of "6.x" is
+    // 100+ clauses over many pages) — replacing the whole block would delete
+    // every clause the images never showed. Returns nil when no confident
+    // window exists; the caller then keeps the original answer and warns.
+    static func splice(run: [[String: Any]], intoSections sections: [[String: Any]], runPrefix: String) -> [[String: Any]]? {
+        let runKeys = run.compactMap { norm($0["content"] as? String) }
+        guard runKeys.count >= 2 else { return nil }
+        func matches(_ a: String, _ b: String) -> Bool { a.hasPrefix(b) || b.hasPrefix(a) }
+        var best: (section: Int, range: Range<Int>, score: Int)?
+        for (si, section) in sections.enumerated() {
+            // The front-matter TOC repeats every clause number with title-like
+            // text; never treat it as the body window.
+            let sectionLabel = "\((section["id"] as? String) ?? "") \((section["title"] as? String) ?? "")"
+            if sectionLabel.localizedCaseInsensitiveContains("Inhaltsverzeichnis") { continue }
+            let subs = (section["subsections"] as? [[String: Any]]) ?? []
+            var i = 0
+            while i < subs.count {
+                guard firstComponent(subs[i]["id"] as? String) == runPrefix else { i += 1; continue }
+                var j = i
+                while j < subs.count, firstComponent(subs[j]["id"] as? String) == runPrefix { j += 1 }
+                // Indices inside the block whose content matches some run item.
+                var matched: [Int] = []
+                for k in i..<j {
+                    guard let wk = norm(subs[k]["content"] as? String) else { continue }
+                    if runKeys.contains(where: { matches($0, wk) }) { matched.append(k) }
+                }
+                if matched.count >= 2, var lo = matched.first, var hi = matched.last,
+                   matched.count > (best?.score ?? 0) {
+                    // Extend over adjacent items whose id the run also carries but
+                    // whose content did not match (that mismatch is the misbinding
+                    // being fixed); without this, a differently-phrased boundary
+                    // item survives next to its replacement as a duplicate.
+                    let runIdSet = Set(run.compactMap { normId($0["id"] as? String) }).subtracting([""])
+                    while lo - 1 >= i, runIdSet.contains(normId(subs[lo - 1]["id"] as? String)) { lo -= 1 }
+                    while hi + 1 < j, runIdSet.contains(normId(subs[hi + 1]["id"] as? String)) { hi += 1 }
+                    best = (si, lo..<(hi + 1), matched.count)
+                }
+                i = j
+            }
+        }
+        guard let best else { return nil }
+        var out = sections
+        var section = out[best.section]
+        var subs = (section["subsections"] as? [[String: Any]]) ?? []
+        subs.replaceSubrange(best.range, with: run)
+        section["subsections"] = subs
+        out[best.section] = section
+        return out
+    }
+
+    private static func firstComponent(_ id: String?) -> String {
+        normId(id).split(separator: ".").first.map(String.init) ?? ""
+    }
+
+    private static func normId(_ id: String?) -> String {
+        (id ?? "").trimmingCharacters(in: CharacterSet(charactersIn: " ."))
+    }
+
+    // Content fingerprint robust against the PDF's line-break hyphenation and
+    // whitespace differences: alphanumerics only, first 48 scalars.
+    private static func norm(_ s: String?) -> String? {
+        guard let s else { return nil }
+        let key = String(String.UnicodeScalarView(
+            s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        ).prefix(48))
+        return key.count >= 12 ? key : nil
+    }
+
     // User-facing warning line; nil when nothing is missing.
     static func warning(missing: [String]) -> String? {
         guard !missing.isEmpty else { return nil }

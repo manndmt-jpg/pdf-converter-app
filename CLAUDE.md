@@ -85,12 +85,17 @@ release script signs each nested binary individually.
   APIResponseParser.parseJSON repairs control chars inside string literals before
   parsing; the outermost-braces fallback slices BEFORE repairing (an odd quote in
   surrounding prose would corrupt structural whitespace otherwise).
-- Models occasionally drop a SMALL run of clauses from an otherwise complete answer
-  (observed live: 6.15.2.4-6.15.2.6 gone, everything else intact) — too small for the
-  <40% completeness guard. ClauseAudit compares clause numbers source-vs-answer after
-  rendering; on a gap the affected chunk is re-asked once (identical prompt, adopt only
-  if strictly fewer ids missing), remaining gaps surface as a warning banner on the
-  success view (QueueItem.warning / HistoryEntry.warning) instead of failing the run.
+- Models occasionally drop or MISBIND a small run of clauses in an otherwise complete
+  answer (observed live: 6.15.2.4-6.15.2.6 gone; 8.6/8.7 fused+shifted) — too small for
+  the <40% completeness guard. ClauseAudit compares clause numbers source-vs-answer
+  after rendering. On a gap: focused VISION re-extraction of only the affected numbered
+  run from 200dpi page images (Prompts.clauseRunSystem; text-only re-asks and even
+  full-doc re-asks WITH images kept misbinding — live-tested), then ClauseAudit.splice
+  replaces the misbound window (found by content fingerprints, TOC sections skipped,
+  only the matched sub-range replaced so a page-capped run never deletes clauses the
+  images did not show). Adoption per run: strictly fewer missing ids + length guard.
+  Remaining gaps surface as a warning banner (QueueItem.warning / HistoryEntry.warning)
+  instead of failing the run.
 - The AHB-style two-column PDFs have a separate number sub-column; PDFKit's text layer
   decouples clause numbers from their paragraphs (runs like "2.7. 2.8. 2.9." away from
   the text). structuredSystem now instructs the model to rebind numbers via the

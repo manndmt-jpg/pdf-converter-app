@@ -1,6 +1,8 @@
-# Version 1.9.1
+# Version 1.10
 
-- Fixed duplicated headings ("Hinweise zum Aufbau... Hinweise zum Aufbau...") and
-  doubled dots after clause numbers in the converted output.
-- Clearer completeness warning: it now explains that flagged clause content may
-  also sit under a shifted number nearby, not only be missing.
+- The completeness check can now FIX what it finds instead of only warning: when
+  clause numbers are missing or shifted (a known weakness of two-column PDFs),
+  the app re-reads the affected pages as images, where the numbering is
+  unambiguous, and splices the corrected clauses into the result. Costs less
+  than a cent and only runs when needed.
+- The warning still appears if the automatic fix does not fully succeed.
