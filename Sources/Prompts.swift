@@ -1,6 +1,8 @@
 import Foundation
 
-// Prompts ported verbatim from ~/Projects/pdf-parser/parse_contract.py
+// Originally ported verbatim from ~/Projects/pdf-parser/parse_contract.py.
+// v1.9 added the two-column-numbering and front-matter rules to structuredSystem
+// (the CLI does not have them).
 enum Prompts {
     static let structuredSystem = """
     You are a German legal document analyst. Your job is to produce a structured summary that mirrors the EXACT section structure of the original document.
@@ -30,6 +32,8 @@ enum Prompts {
 
     CRITICAL RULES:
     - Preserve the EXACT section numbering from the document (§1, §2, etc. and their subsections 1., 2., 3., etc.)
+    - The text often comes from a two-column PDF whose text layer separates clause numbers from their paragraphs: you may see runs of bare clause numbers (e.g. "2.7. 2.8. 2.9. 2.10.") dumped together, away from the texts they belong to. Rebind every clause number to its correct paragraph. Use the document's own table of contents (Inhaltsverzeichnis) and its internal cross-references (e.g. "Ziffer 6.25") as the authoritative numbering map. Never invent or shift numbering; every clause number that appears in the document must appear exactly once as a section/subsection id.
+    - Include ALL front matter as sections: cover notes (e.g. "Hinweise zum Aufbau und zur Anwendung") and the complete table of contents, before the body sections.
     - Keep ALL text in the ORIGINAL LANGUAGE (German). Do NOT translate.
     - Do NOT summarize. Include the FULL content of every subsection.
     - If a subsection is long, include it in full — do not truncate.

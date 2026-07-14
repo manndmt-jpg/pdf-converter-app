@@ -49,6 +49,9 @@ enum ConversionError: LocalizedError {
 
 struct ConversionResult {
     let outputURL: URL
+    // Non-fatal quality issue the user should know about (e.g. clause numbers
+    // present in the PDF but absent from the answer). The file is still saved.
+    let warning: String?
 }
 
 // Ports the pipeline from parse_contract.py: text-layer PDFs get one structured
@@ -94,35 +97,36 @@ struct Converter {
 
         let pages = extractPages(doc: doc)
         let sourceName = url.deletingPathExtension().lastPathComponent
-        let markdown: String
+        let result: (markdown: String, warning: String?)
 
         if pages.isEmpty {
-            markdown = try await convertScanned(doc: doc, sourceName: sourceName, progress: progress)
+            result = (try await convertScanned(doc: doc, sourceName: sourceName, progress: progress), nil)
         } else {
             do {
-                markdown = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: false, progress: progress)
+                result = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: false, progress: progress)
             } catch ConversionError.responseTruncated where pages.count > 1 {
                 // The one-pass answer would not fit or never came back as valid JSON
                 // even after re-asks. Halve the request: smaller answers stay far from
                 // the token cap and are much less likely to contain broken JSON.
-                markdown = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: true, progress: progress)
+                result = try await convertTextLayer(pages: pages, pageCount: pageCount, sourceName: sourceName, forceSplit: true, progress: progress)
             }
         }
 
         progress("Saving…", nil)
-        let outputURL = try save(markdown: markdown, sourceURL: url)
-        return ConversionResult(outputURL: outputURL)
+        let outputURL = try save(markdown: result.markdown, sourceURL: url)
+        return ConversionResult(outputURL: outputURL, warning: result.warning)
     }
 
     // MARK: - Text-layer path (structured JSON, chunked when large)
 
-    private func convertTextLayer(pages: [String], pageCount: Int, sourceName: String, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> String {
+    private func convertTextLayer(pages: [String], pageCount: Int, sourceName: String, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> (markdown: String, warning: String?) {
         let totalChars = pages.reduce(0) { $0 + $1.count }
         let maxChars = forceSplit
             ? min(DocumentChunker.maxChunkChars / 2, totalChars / 2)
             : DocumentChunker.maxChunkChars
         let chunks = DocumentChunker.chunk(pages: pages, maxChars: maxChars)
         var parsed: [[String: Any]] = []
+        var userContents: [String] = []   // kept verbatim for the clause-audit retry
         var openSection: String?
         for (i, chunkText) in chunks.enumerated() {
             if chunks.count == 1 {
@@ -141,6 +145,7 @@ struct Converter {
                 }
                 userContent = "Dokumenttext, Teil \(i + 1) von \(chunks.count) (insgesamt \(pageCount) Seiten):\n\n\(chunkText)\n\n\(userPrompt)\n\n\(hint)"
             }
+            userContents.append(userContent)
             var json: [String: Any] = [:]
             var parseFailures = 0
             while true {
@@ -171,7 +176,7 @@ struct Converter {
             }
         }
         let merged = parsed.count == 1 ? parsed[0] : DocumentChunker.merge(parsed)
-        let markdown = MarkdownRenderer.render(merged, sourceName: sourceName)
+        var markdown = MarkdownRenderer.render(merged, sourceName: sourceName)
         // The prompt forbids summarizing, so a faithful answer is roughly as long as
         // the source (measured: 126K chars rendered from 125.7K source). A drastically
         // shorter answer means the model silently skipped content (observed on Vertex
@@ -180,7 +185,56 @@ struct Converter {
             DebugLog.dump("incomplete-answer", markdown)
             throw ConversionError.responseTruncated
         }
-        return markdown
+
+        // Clause audit: an answer can pass the length guard and still be missing a
+        // small run of clauses (observed live: 6.15.2.4-6.15.2.6 dropped from an
+        // otherwise complete answer). Sampling is nondeterministic, so re-asking the
+        // affected chunk once usually recovers them; whatever remains missing after
+        // that is surfaced to the user instead of silently shipping a hole.
+        var missing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: markdown)
+        if !missing.isEmpty, missing.count <= ClauseAudit.retryThreshold {
+            progress("Answer may be missing clause \(missing[0]) — asking again", nil)
+            var retried = parsed
+            var didRetry = false
+            for (i, chunkText) in chunks.enumerated() {
+                let chunkIds = ClauseAudit.ids(in: chunkText)
+                guard missing.contains(where: { chunkIds.contains($0) }) else { continue }
+                do {
+                    let response = try await chat(system: Prompts.structuredSystem, userText: userContents[i], maxAttempts: 5)
+                    try Task.checkCancellation()
+                    let json = Self.parseJSON(response)
+                    if json["raw_response"] == nil {
+                        retried[i] = json
+                        didRetry = true
+                    } else {
+                        DebugLog.dump("audit-retry-unparseable-part\(i + 1)", response)
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let error as URLError where error.code == .cancelled {
+                    throw error
+                } catch {
+                    // The first answer is already usable; a failed audit retry must
+                    // not sink the conversion.
+                    DebugLog.dump("audit-retry-failed-part\(i + 1)", String(describing: error))
+                }
+            }
+            if didRetry {
+                let newMerged = retried.count == 1 ? retried[0] : DocumentChunker.merge(retried)
+                let newMarkdown = MarkdownRenderer.render(newMerged, sourceName: sourceName)
+                let newMissing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: newMarkdown)
+                // Adopt the retry only when it is strictly better; the length guard
+                // applies to it too so a short-but-id-complete answer cannot win.
+                if newMissing.count < missing.count, newMarkdown.count >= totalChars * 2 / 5 {
+                    markdown = newMarkdown
+                    missing = newMissing
+                }
+            }
+        }
+        if !missing.isEmpty {
+            DebugLog.dump("clause-audit-missing", missing.joined(separator: ", "))
+        }
+        return (markdown, ClauseAudit.warning(missing: missing))
     }
 
     // MARK: - Text extraction

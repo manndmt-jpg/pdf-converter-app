@@ -23,6 +23,9 @@ struct QueueItem: Identifiable, Equatable {
     var hasTextLayer: Bool?
     var startedAt: Date?
     var finishedAt: Date?
+    // Non-fatal quality note from the converter (clause audit); shown on the
+    // success view. The output file is saved regardless.
+    var warning: String?
 
     var duration: String? {
         guard let startedAt, let finishedAt else { return nil }
@@ -47,6 +50,8 @@ struct HistoryEntry: Codable, Identifiable {
     let name: String
     let outputPath: String
     let date: Date
+    // Optional so history saved by older versions still decodes.
+    var warning: String?
 }
 
 @MainActor
@@ -193,9 +198,11 @@ final class ConversionQueue: ObservableObject {
                         ConversionQueue.shared.updateStatus(itemID, .converting(detail: detail, fraction: fraction))
                     }
                 }
+                self.setWarning(itemID, result.warning)
                 self.updateStatus(itemID, .done(result.outputURL))
-                self.addToHistory(name: url.lastPathComponent, outputURL: result.outputURL)
-                self.notify(title: "Converted", body: "Saved: \(result.outputURL.lastPathComponent)")
+                self.addToHistory(name: url.lastPathComponent, outputURL: result.outputURL, warning: result.warning)
+                self.notify(title: result.warning == nil ? "Converted" : "Converted with a completeness warning",
+                            body: "Saved: \(result.outputURL.lastPathComponent)")
             } catch is CancellationError {
                 self.updateStatus(itemID, .cancelled)
             } catch let error as URLError where error.code == .cancelled {
@@ -218,6 +225,11 @@ final class ConversionQueue: ObservableObject {
         }
     }
 
+    private func setWarning(_ id: UUID, _ warning: String?) {
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        items[idx].warning = warning
+    }
+
     // MARK: - History
 
     private static let historyKey = "conversionHistory"
@@ -229,9 +241,9 @@ final class ConversionQueue: ObservableObject {
         history = entries
     }
 
-    private func addToHistory(name: String, outputURL: URL) {
+    private func addToHistory(name: String, outputURL: URL, warning: String?) {
         history.removeAll { $0.outputPath == outputURL.path }
-        history.insert(HistoryEntry(name: name, outputPath: outputURL.path, date: Date()), at: 0)
+        history.insert(HistoryEntry(name: name, outputPath: outputURL.path, date: Date(), warning: warning), at: 0)
         history = Array(history.prefix(8))
         saveHistory()
     }

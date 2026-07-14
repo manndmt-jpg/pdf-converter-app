@@ -33,8 +33,20 @@ release script signs each nested binary individually.
 
 - `PDFConverterApp.swift` - @main, AppDelegate (Dock/Finder open, quit guard, env key import)
 - `ConversionQueue.swift` - @MainActor singleton, sequential queue, statuses, history, notifications
-- `Converter.swift` - engine: PDFKit text extraction; text layer -> one structured JSON call;
-  no text layer -> per-page Gemini Vision OCR (300 dpi PNG). Retries 5xx/429/network 3x.
+- `Converter.swift` - engine: PDFKit text extraction; text layer -> structured JSON call(s)
+  (chunked when large, split-in-halves fallback, completeness guard, Mistral fallback);
+  no text layer -> per-page Gemini Vision OCR (300 dpi PNG). Retries HTTP + embedded
+  5xx/429/network, 5 attempts on structured calls, rate-limit-aware backoff.
+- `APIResponseParser.swift` - Foundation-only: interprets 200-OK bodies (embedded provider
+  errors, truncation, transient flag) + parseJSON with control-char repair. Kept
+  standalone-compilable so scratch harnesses can test it against real captured responses.
+- `DocumentChunker.swift` - Foundation-only: page-group chunking (>160K chars) + merge
+  with section folding. Same standalone-compilable rule.
+- `ClauseAudit.swift` - Foundation-only: detects silently dropped clauses by comparing
+  multi-level clause numbers (6.15.2.4) in the source text vs the rendered answer;
+  a sibling gate (id needs a numeric neighbor in the doc) suppresses date/phone
+  artifacts. Same standalone-compilable rule.
+- `DebugLog.swift` - dumps unusable model answers to ~/Library/Logs/PDFConverter/
 - `Prompts.swift` - system prompts, verbatim from parse_contract.py
 - `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown()
 - `AppSettings.swift` / `SettingsView.swift` - backend picker (OpenRouter | Vertex AI EU),
@@ -66,6 +78,21 @@ release script signs each nested binary individually.
   exhausts retries on 429/5xx/empty. Mistral is slow on big docs (13 min for 17 pages,
   measured), hence request timeoutInterval 1500s. Vision/OCR stays Gemini-only.
 - Failed/unusable model answers are dumped to `~/Library/Logs/PDFConverter/`.
+- Gemini intermittently emits RAW newlines/tabs inside JSON string values; strict
+  parsers reject the whole (otherwise complete, correct) answer over one character.
+  APIResponseParser.parseJSON repairs control chars inside string literals before
+  parsing; the outermost-braces fallback slices BEFORE repairing (an odd quote in
+  surrounding prose would corrupt structural whitespace otherwise).
+- Models occasionally drop a SMALL run of clauses from an otherwise complete answer
+  (observed live: 6.15.2.4-6.15.2.6 gone, everything else intact) — too small for the
+  <40% completeness guard. ClauseAudit compares clause numbers source-vs-answer after
+  rendering; on a gap the affected chunk is re-asked once (identical prompt, adopt only
+  if strictly fewer ids missing), remaining gaps surface as a warning banner on the
+  success view (QueueItem.warning / HistoryEntry.warning) instead of failing the run.
+- The AHB-style two-column PDFs have a separate number sub-column; PDFKit's text layer
+  decouples clause numbers from their paragraphs (runs like "2.7. 2.8. 2.9." away from
+  the text). structuredSystem now instructs the model to rebind numbers via the
+  document's own TOC/cross-references and to include front matter + TOC in the output.
 
 ## UI (v1.3+ redesign)
 
@@ -105,3 +132,7 @@ release script signs each nested binary individually.
 - Scanned-page OCR goes through Gemini Vision (parity with the CLI), NOT Apple Vision
 - PDF only; the CLI's .docx support was not ported
 - Relaunch the app after code changes (rebuild does not hot-reload)
+- TWO app copies exist: /Applications (notarized release, what the Dock launches) and
+  the project-dir dev bundle (what build-app.sh produces). When testing fixes, open the
+  PROJECT-DIR bundle explicitly and verify with `ps` which one is running; two user
+  test rounds were wasted on the stale /Applications copy.

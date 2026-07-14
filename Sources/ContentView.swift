@@ -50,7 +50,8 @@ struct ContentView: View {
                 EmptyStateView()
             }
         case .history(let path):
-            HistoryDetailView(outputURL: URL(fileURLWithPath: path))
+            HistoryDetailView(outputURL: URL(fileURLWithPath: path),
+                              warning: queue.history.first { $0.outputPath == path }?.warning)
         case nil:
             EmptyStateView()
         }
@@ -505,7 +506,7 @@ struct ItemDetailView: View {
         case .failed(let message):
             FailureView(item: item, message: message)
         case .done(let url):
-            SuccessView(outputURL: url, metadata: successMetadata)
+            SuccessView(outputURL: url, metadata: successMetadata, warning: item.warning)
         case .waiting:
             centeredInfo(icon: "clock", tint: DS.textTertiary,
                          title: "Waiting in queue",
@@ -718,6 +719,7 @@ struct FailureView: View {
 
 struct HistoryDetailView: View {
     let outputURL: URL
+    var warning: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -740,7 +742,7 @@ struct HistoryDetailView: View {
             .padding(.horizontal, 16)
             .frame(height: 52)
             Rectangle().fill(DS.hairline).frame(height: 1)
-            SuccessView(outputURL: outputURL, metadata: nil)
+            SuccessView(outputURL: outputURL, metadata: nil, warning: warning)
         }
     }
 }
@@ -752,6 +754,7 @@ enum PreviewMode: String { case formatted, raw }
 struct SuccessView: View {
     let outputURL: URL
     let metadata: String?
+    var warning: String?
     @State private var rawContent = ""
     @State private var previewText = AttributedString("")
     @State private var formattedCache: AttributedString?
@@ -767,9 +770,14 @@ struct SuccessView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let warning {
+                warningBanner(warning)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 16)
+            }
             preview
                 .padding(.horizontal, 18)
-                .padding(.top, 16)
+                .padding(.top, warning == nil ? 16 : 10)
                 .padding(.bottom, metadata == nil ? 16 : 10)
             if let metadata {
                 HStack(spacing: 16) {
@@ -787,6 +795,27 @@ struct SuccessView: View {
         .onAppear(perform: loadPreview)
         .onChange(of: outputURL) { _, _ in loadPreview() }
         .onChange(of: mode) { _, _ in rebuild() }
+    }
+
+    // The conversion succeeded and the file is saved, but the clause audit found
+    // numbers present in the PDF and absent from the answer; the user must see
+    // this before trusting the output.
+    private func warningBanner(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(DS.warning)
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(DS.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(DS.warning.opacity(0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(DS.warning.opacity(0.35), lineWidth: 0.5))
     }
 
     // Non-scrolling toolbar strip on top of the card; content scrolls below the
