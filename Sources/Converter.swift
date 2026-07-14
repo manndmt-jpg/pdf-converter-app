@@ -194,17 +194,21 @@ struct Converter {
         // extraction of ONLY the affected numbered run from the page images, then
         // splicing that run into the answer by content match. Whatever is still
         // missing afterwards is surfaced to the user instead of silently shipped.
-        var missing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: markdown)
+        let sourceText = chunks.joined(separator: "\n\n")
+        var missing = ClauseAudit.missingIds(source: sourceText, answer: markdown)
+        var currentMerged = merged
         if !missing.isEmpty, missing.count <= ClauseAudit.retryThreshold {
             progress("Numbering unclear around clause \(missing[0]), re-reading the affected pages", nil)
-            var currentMerged = merged
             let runs = Dictionary(grouping: missing) { $0.split(separator: ".").first.map(String.init) ?? $0 }
             for (prefix, runMissing) in runs.sorted(by: { (Int($0.key) ?? 0) < (Int($1.key) ?? 0) }).prefix(3) {
                 let images = ClauseAudit.pdfPageNumbers(missing: runMissing, pageTexts: pages)
                     .compactMap { doc.page(at: $0 - 1) }
                     .compactMap { Self.renderPNG(page: $0, dpi: 200) }
                     .map { $0.base64EncodedString() }
-                guard !images.isEmpty else { continue }
+                guard !images.isEmpty else {
+                    DebugLog.dump("audit-images-empty-\(prefix)", runMissing.joined(separator: ", "))
+                    continue
+                }
                 let ask = """
                 Auf den angehängten Seitenbildern steht die Ziffer\(runMissing.count == 1 ? "" : "n") \(runMissing.joined(separator: ", ")) (Hauptziffer \(prefix)). \
                 Transkribiere alle AUF DEN BILDERN SICHTBAREN Ziffern der Hauptziffer \(prefix) (einschließlich \(runMissing.joined(separator: ", "))), jede mit vollem Wortlaut, in der Reihenfolge der Bilder. \
@@ -217,7 +221,7 @@ struct Converter {
                     try Task.checkCancellation()
                     let json = Self.parseJSON(response)
                     guard let rawRun = json["subsections"] as? [[String: Any]],
-                          let run = ClauseAudit.sanitizeRun(rawRun, prefix: prefix) else {
+                          let run = ClauseAudit.sanitizeRun(rawRun, prefix: prefix, mustContain: runMissing) else {
                         DebugLog.dump("audit-run-unusable-\(prefix)", response)
                         continue
                     }
@@ -231,7 +235,7 @@ struct Converter {
                         var candidate = currentMerged
                         candidate["sections"] = spliced
                         let newMarkdown = MarkdownRenderer.render(candidate, sourceName: sourceName)
-                        let newMissing = ClauseAudit.missingIds(source: chunks.joined(separator: "\n\n"), answer: newMarkdown)
+                        let newMissing = ClauseAudit.missingIds(source: sourceText, answer: newMarkdown)
                         // Adopt each run's splice on its own merits: one failed
                         // splice must not poison another run's successful fix, and
                         // the length guard keeps a shrunken answer from winning.
@@ -242,6 +246,11 @@ struct Converter {
                         } else {
                             DebugLog.dump("audit-splice-rejected-\(prefix)", newMarkdown)
                         }
+                    } else {
+                        // No confident window in the answer for this run: keep the
+                        // original and warn. The dump preserves the vision answer
+                        // for diagnosis (this path used to exit without a trace).
+                        DebugLog.dump("audit-splice-nil-\(prefix)", response)
                     }
                 } catch is CancellationError {
                     throw CancellationError()
@@ -257,7 +266,17 @@ struct Converter {
         if !missing.isEmpty {
             DebugLog.dump("clause-audit-missing", missing.joined(separator: ", "))
         }
-        return (markdown, ClauseAudit.warning(missing: missing))
+        // The reverse audit: numbering the answer carries that the PDF does not.
+        // Warn only — mutating content on suspicion is worse than flagging it.
+        let invented = ClauseAudit.inventedIds(source: sourceText, answer: markdown)
+        let bare = ClauseAudit.bareNumberedSections(
+            sections: (currentMerged["sections"] as? [[String: Any]]) ?? [], source: sourceText)
+        if !invented.isEmpty || !bare.isEmpty {
+            DebugLog.dump("clause-audit-invented",
+                          "invented: \(invented.joined(separator: ", ")) | bare-numbered sections: \(bare.joined(separator: ", "))")
+        }
+        return (markdown, ClauseAudit.warning(missing: missing, invented: invented,
+                                              bareSections: bare, pageTexts: pages))
     }
 
     // MARK: - Text extraction

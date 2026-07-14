@@ -1,8 +1,12 @@
-# Version 1.10
+# Version 1.11
 
-- The completeness check can now FIX what it finds instead of only warning: when
-  clause numbers are missing or shifted (a known weakness of two-column PDFs),
-  the app re-reads the affected pages as images, where the numbering is
-  unambiguous, and splices the corrected clauses into the result. Costs less
-  than a cent and only runs when needed.
-- The warning still appears if the automatic fix does not fully succeed.
+- The converter no longer invents numbering: models used to give unnumbered
+  paragraphs their own numbers ("1.", "2." under a clause that prints plain
+  text). The prompt now forbids it, and a new reverse audit catches any case
+  that still slips through and says so in the warning.
+- Warnings now include PDF page numbers ("clause 1.5, PDF page 15"), so a
+  flagged clause can actually be found in documents whose sections restart
+  their numbering.
+- The automatic page-image fix handles two more hard cases: pages showing two
+  differently-numbered sections at once, and transcriptions that repeat the
+  clause number inside the text.

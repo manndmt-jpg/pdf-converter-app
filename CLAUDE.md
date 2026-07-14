@@ -42,10 +42,18 @@ release script signs each nested binary individually.
   standalone-compilable so scratch harnesses can test it against real captured responses.
 - `DocumentChunker.swift` - Foundation-only: page-group chunking (>160K chars) + merge
   with section folding. Same standalone-compilable rule.
-- `ClauseAudit.swift` - Foundation-only: detects silently dropped clauses by comparing
-  multi-level clause numbers (6.15.2.4) in the source text vs the rendered answer;
-  a sibling gate (id needs a numeric neighbor in the doc) suppresses date/phone
-  artifacts. Same standalone-compilable rule.
+- `ClauseAudit.swift` - Foundation-only: two-sided clause-number audit. Forward:
+  multi-level ids (6.15.2.4) in the source text missing from the rendered answer
+  (silently dropped clauses); a sibling gate (id needs a numeric neighbor) suppresses
+  date/phone artifacts. Reverse: answer ids the source never prints (inventedIds,
+  tolerant of line-break-split source numbers) and bareNumberedSections (paragraphs
+  numbered "1."/"2." under a multi-level section where the PDF prints no number —
+  models do this document-wide; observed 63 fabricated labels in one AHB answer).
+  Printed inline enumerations are exempted by an adjacency check: real enumeration
+  numbers sit directly before their text in the text layer, only clause ids live in
+  the decoupled number column; the check needs 24 chars of content anchor because
+  12 let a cross-reference ("Ziffer 1. ausgeschlossen") vouch for unrelated
+  paragraphs. Same standalone-compilable rule.
 - `DebugLog.swift` - dumps unusable model answers to ~/Library/Logs/PDFConverter/
 - `Prompts.swift` - system prompts, verbatim from parse_contract.py
 - `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown(); v1.9.1
@@ -100,6 +108,21 @@ release script signs each nested binary individually.
   decouples clause numbers from their paragraphs (runs like "2.7. 2.8. 2.9." away from
   the text). structuredSystem now instructs the model to rebind numbers via the
   document's own TOC/cross-references and to include front matter + TOC in the output.
+- Models also NUMBER UNNUMBERED PARAGRAPHS ("1.", "2." under 6.8 where the print has
+  plain paragraphs) — structuredSystem forbids it (unnumbered paragraphs: append to the
+  preceding subsection or id ""; the renderer prints empty-id content without a label;
+  live-verified on a pages-4-6 slice: 0 inventions, 27 empty ids, real 6.7.1/6.7.2 kept).
+  Remaining cases surface in the warning banner (bareNumberedSections + inventedIds),
+  with PDF page numbers on missing/invented ids (Abschnitte restart numbering, so a
+  bare "1.5" is unfindable without its page).
+- Warnings and audit fallbacks are warn-only: never mutate content on suspicion.
+  All audit dead-ends dump to ~/Library/Logs/PDFConverter/ (audit-images-empty,
+  audit-splice-nil included — both paths used to exit silently).
+- `eval/` is the offline quality harness: `python3 eval/score.py <pdf> <md>` scores
+  missing/invented/bare ids, duplicates, order flips, content recall. Run it after
+  every prompt or pipeline change. Id extraction is a 1:1 port of ClauseAudit —
+  keep them in sync. `eval/corpus/` (golden PDFs) is gitignored: public repo, no
+  third-party documents.
 
 ## UI (v1.3+ redesign)
 

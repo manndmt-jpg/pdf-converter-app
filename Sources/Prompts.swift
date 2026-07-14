@@ -33,6 +33,7 @@ enum Prompts {
     CRITICAL RULES:
     - Preserve the EXACT section numbering from the document (§1, §2, etc. and their subsections 1., 2., 3., etc.)
     - The text often comes from a two-column PDF whose text layer separates clause numbers from their paragraphs: you may see runs of bare clause numbers (e.g. "2.7. 2.8. 2.9. 2.10.") dumped together, away from the texts they belong to. Rebind every clause number to its correct paragraph. Use the document's own table of contents (Inhaltsverzeichnis) and its internal cross-references (e.g. "Ziffer 6.25") as the authoritative numbering map. Never invent or shift numbering; every clause number that appears in the document must appear exactly once as a section/subsection id.
+    - Use a number as a subsection id ONLY if the document prints that exact number. Many paragraphs have NO printed number (e.g. explanatory paragraphs under a numbered clause): append such a paragraph to the content of the preceding numbered subsection, or use an empty id "" if no numbered subsection precedes it in the section. NEVER generate sequence numbers (1., 2., 3.) for unnumbered paragraphs.
     - Include ALL front matter as sections: cover notes (e.g. "Hinweise zum Aufbau und zur Anwendung") and the complete table of contents, before the body sections.
     - Keep ALL text in the ORIGINAL LANGUAGE (German). Do NOT translate.
     - Do NOT summarize. Include the FULL content of every subsection.

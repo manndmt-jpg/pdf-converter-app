@@ -56,13 +56,96 @@ enum ClauseAudit {
     static func missingIds(source: String, answer: String) -> [String] {
         let sourceIds = ids(in: source)
         guard sourceIds.count >= minSourceIds else { return [] }
-        return sourceIds.subtracting(ids(in: answer))
-            .filter { hasClauseNeighbor($0, in: sourceIds) }
-            .sorted { a, b in
-                let ac = a.split(separator: ".").map { Int($0) ?? 0 }
-                let bc = b.split(separator: ".").map { Int($0) ?? 0 }
-                return ac.lexicographicallyPrecedes(bc)
+        return numericallySorted(sourceIds.subtracting(ids(in: answer))
+            .filter { hasClauseNeighbor($0, in: sourceIds) })
+    }
+
+    // The reverse direction: clause ids the answer carries that the source never
+    // printed — fabricated numbering (a model numbering unnumbered paragraphs or
+    // extending a run past its printed end). Gated by the answer's own pool: a
+    // fabricated clause id sits inside a numbered run in the answer, while a
+    // date or reference artifact stands alone.
+    static func inventedIds(source: String, answer: String) -> [String] {
+        let sourceIds = ids(in: source)
+        guard sourceIds.count >= minSourceIds else { return [] }
+        let answerIds = ids(in: answer)
+        return numericallySorted(answerIds.subtracting(sourceIds)
+            .filter { hasClauseNeighbor($0, in: answerIds) && !containsLoosely($0, in: source) })
+    }
+
+    // The text layer sometimes splits a printed number across a line break
+    // ("Ziffer 6.\n25"): id extraction misses it in the source while the model
+    // correctly rejoins it in the answer. Before calling an answer id invented,
+    // check the source tolerating whitespace inside the number.
+    private static func containsLoosely(_ id: String, in source: String) -> Bool {
+        let pattern = id.split(separator: ".").joined(separator: "\\s*\\.\\s*")
+        return source.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    // Section ids under which the answer numbers paragraphs the PDF does not
+    // number. A subsection labeled with a bare "1." under a multi-level section
+    // "6.8" claims a printed clause 6.8.1; if the source has no such clause id,
+    // or the same section already carries the explicit multi-level id, the bare
+    // label is invented (observed live: unnumbered paragraphs under 6.2-6.18
+    // returned as "1.", "2."). Bare ids under textual or top-level sections
+    // ("§ 1", "Abschnitt 2") are the document's own printed numbering and pass.
+    static func bareNumberedSections(sections: [[String: Any]], source: String) -> [String] {
+        let sourceIds = ids(in: source)
+        guard sourceIds.count >= minSourceIds else { return [] }
+        var flagged: [String] = []
+        for section in sections {
+            let sid = normId(section["id"] as? String)
+            let sidComps = sid.split(separator: ".")
+            guard sidComps.count >= 2, sidComps.allSatisfy({ $0.allSatisfy(\.isNumber) }) else { continue }
+            let subs = (section["subsections"] as? [[String: Any]]) ?? []
+            let explicit = Set(subs.map { normId($0["id"] as? String) })
+            for sub in subs {
+                let subID = normId(sub["id"] as? String)
+                guard subID.count <= 2, !subID.isEmpty, subID.allSatisfy(\.isNumber) else { continue }
+                // Printed inline enumerations ("... durch: 1. Krieg; 2. Kern-
+                // energie") keep their numbers adjacent to their text in the
+                // text layer; only clause ids live in the decoupled number
+                // column. A bare label whose number the source prints right
+                // before the paragraph text is the document's own numbering.
+                if sourceShowsNumber(subID, before: (sub["content"] as? String) ?? "", in: source) { continue }
+                let composite = "\(sid).\(subID)"
+                if !sourceIds.contains(composite) || explicit.contains(composite) {
+                    if !flagged.contains(sid) { flagged.append(sid) }
+                    break
+                }
             }
+        }
+        return flagged
+    }
+
+    // True when the source contains "<n>." directly followed by the start of
+    // the given paragraph text (whitespace, soft hyphens, and line-break
+    // hyphenation tolerated between characters). Too little text to judge
+    // counts as printed: never flag on weak evidence.
+    private static func sourceShowsNumber(_ n: String, before content: String, in source: String) -> Bool {
+        // 24 matched characters, because German legal prose reuses openings:
+        // a 12-char key let the cross-reference "nach Teil B Abschnitt 3
+        // Ziffer 1. ausgeschlossen." vouch for every paragraph starting
+        // "Ausgeschlossen sind..." (observed on the AHB). The gap class
+        // absorbs whitespace and punctuation between words; letters and
+        // digits stay hard anchors.
+        let key = content.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.prefix(24)
+        guard key.count >= 4 else { return true }
+        let gap = "[\\s\u{00AD}\\-.,;:()'\"„“/]*"
+        // The lookbehind keeps a longer clause id's tail from counting: in
+        // "6.9.1. Versichert ist..." the "1." belongs to 6.9.1, and must not
+        // vouch for a bare "1." elsewhere that starts with the same words.
+        let pattern = "(?<![0-9.,])" + NSRegularExpression.escapedPattern(for: n) + "[.)]?" + gap
+            + key.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: gap)
+        return source.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func numericallySorted<S: Sequence>(_ ids: S) -> [String] where S.Element == String {
+        ids.sorted { a, b in
+            let ac = a.split(separator: ".").map { Int($0) ?? 0 }
+            let bc = b.split(separator: ".").map { Int($0) ?? 0 }
+            return ac.lexicographicallyPrecedes(bc)
+        }
     }
 
     // Real clauses live in numbered runs, so a real clause id has a numeric
@@ -98,6 +181,25 @@ enum ClauseAudit {
         return preferred.isEmpty ? collectPages(missing: missing, pageTexts: pageTexts, skipTOC: false) : preferred
     }
 
+    // First body page (non-TOC when possible) that mentions each id, for the
+    // user-facing warning: "1.5" alone is unfindable in a document whose
+    // Abschnitte each restart numbering at 1, "1.5 (PDF page 15)" is one flip.
+    static func pageLocations(ids missing: [String], pageTexts: [String]) -> [String: Int] {
+        var locations: [String: Int] = [:]
+        for skipTOC in [true, false] {
+            for text in pageTexts {
+                guard let page = pageNumber(fromMarker: text) else { continue }
+                if skipTOC, text.localizedCaseInsensitiveContains("Inhaltsverzeichnis") { continue }
+                let pageIds = ids(in: text)
+                for id in missing where locations[id] == nil && pageIds.contains(id) {
+                    locations[id] = page
+                }
+            }
+            if locations.count == missing.count { break }
+        }
+        return locations
+    }
+
     private static func collectPages(missing: [String], pageTexts: [String], skipTOC: Bool) -> [Int] {
         let missingSet = Set(missing)
         var result: [Int] = []
@@ -115,17 +217,66 @@ enum ClauseAudit {
 
     // Defends the splice against a sloppy vision answer: drops items with empty
     // id/content or a foreign top-level number (page images can show the next
-    // section too), rejects the whole run on duplicate ids. Returns nil when
-    // what remains is not a usable run.
-    static func sanitizeRun(_ run: [[String: Any]], prefix: String) -> [[String: Any]]? {
-        let cleaned = run.filter {
-            firstComponent($0["id"] as? String) == prefix
-                && !normId($0["id"] as? String).isEmpty
-                && !(($0["content"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    // section too), and strips an item's own id repeated at the start of its
+    // content (the vision model often transcribes the printed number into the
+    // text; the leftover prefix breaks the splice's content fingerprints and
+    // would render doubled, "**1.1.** 1.1. Die...").
+    //
+    // Duplicate ids usually mean the images showed TWO runs with the same top-
+    // level number (Abschnitte restart numbering at 1, and one page can show
+    // the end of one Abschnitt and the start of the next). When mustContain
+    // names the ids being recovered, the run is split at each id repeat and the
+    // one segment holding all of them wins; with no way to choose, nil.
+    static func sanitizeRun(_ run: [[String: Any]], prefix: String, mustContain: [String] = []) -> [[String: Any]]? {
+        let cleaned: [[String: Any]] = run.compactMap { item in
+            var item = item
+            let id = normId(item["id"] as? String)
+            guard firstComponent(item["id"] as? String) == prefix, !id.isEmpty else { return nil }
+            let content = stripLeadingId((item["content"] as? String) ?? "", id: id)
+            guard !content.isEmpty else { return nil }
+            item["content"] = content
+            return item
         }
         let ids = cleaned.map { normId($0["id"] as? String) }
-        guard cleaned.count >= 2, Set(ids).count == ids.count else { return nil }
-        return cleaned
+        guard cleaned.count >= 2 else { return nil }
+        if Set(ids).count == ids.count { return cleaned }
+        var segments: [[[String: Any]]] = [[]]
+        var seen = Set<String>()
+        for (item, id) in zip(cleaned, ids) {
+            if seen.contains(id) {
+                segments.append([])
+                seen = []
+            }
+            segments[segments.count - 1].append(item)
+            seen.insert(id)
+        }
+        let wanted = Set(mustContain)
+        guard !wanted.isEmpty else { return nil }
+        let candidates = segments.filter { segment in
+            let segmentIds = Set(segment.map { normId($0["id"] as? String) })
+            return wanted.allSatisfy { segmentIds.contains($0) }
+        }
+        guard candidates.count == 1, let winner = candidates.first, winner.count >= 2 else { return nil }
+        return winner
+    }
+
+    // "1.1. Die Vertragsdauer..." under id "1.1" -> "Die Vertragsdauer...".
+    // A digit right after the id's dot is an amount, not a label ("2.500 Euro"
+    // under id "2"), and is left alone. The separator may be any whitespace
+    // (vision answers use tabs, newlines, and non-breaking spaces); content
+    // that is nothing but its own number strips to empty and gets dropped.
+    private static func stripLeadingId(_ content: String, id: String) -> String {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, trimmed.hasPrefix(id) else { return trimmed }
+        var rest = String(trimmed.dropFirst(id.count))
+        guard let first = rest.first else { return "" }
+        if first == "." {
+            rest.removeFirst()
+            if let next = rest.first, next.isNumber { return trimmed }
+        } else if !first.isWhitespace {
+            return trimmed
+        }
+        return rest.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // Parses the "--- Seite N von M ---" header Converter.extractPages prepends.
@@ -211,11 +362,34 @@ enum ClauseAudit {
         return key.count >= 12 ? key : nil
     }
 
-    // User-facing warning line; nil when nothing is missing.
-    static func warning(missing: [String]) -> String? {
-        guard !missing.isEmpty else { return nil }
-        let shown = missing.prefix(10).joined(separator: ", ")
-        let more = missing.count > 10 ? " and \(missing.count - 10) more" : ""
-        return "Clause number\(missing.count == 1 ? "" : "s") \(shown)\(more) appear\(missing.count == 1 ? "s" : "") in the PDF but not in the result. The content may be missing, or it may sit under a shifted number nearby. Compare that part against the PDF, or re-drop the file to convert again."
+    // User-facing warning; nil when nothing is wrong. Each id carries its PDF
+    // page so the user can actually find it (Abschnitte restart numbering, so a
+    // bare "1.5" is ambiguous in the printed document).
+    static func warning(missing: [String],
+                        invented: [String] = [],
+                        bareSections: [String] = [],
+                        pageTexts: [String] = []) -> String? {
+        let locations = pageLocations(ids: missing + invented, pageTexts: pageTexts)
+        func list(_ ids: [String]) -> String {
+            let shown = ids.prefix(10)
+                .map { id in locations[id].map { "\(id) (PDF page \($0))" } ?? id }
+                .joined(separator: ", ")
+            return ids.count > 10 ? "\(shown) and \(ids.count - 10) more" : shown
+        }
+        var parts: [String] = []
+        if !missing.isEmpty {
+            parts.append("Clause number\(missing.count == 1 ? "" : "s") \(list(missing)) appear\(missing.count == 1 ? "s" : "") in the PDF but not in the result. The content may be missing, or it may sit under a shifted number nearby.")
+        }
+        if !invented.isEmpty {
+            parts.append("The result contains clause number\(invented.count == 1 ? "" : "s") \(list(invented)) that the PDF does not print; the numbering there may be invented.")
+        }
+        if !bareSections.isEmpty {
+            let shown = bareSections.prefix(8).joined(separator: ", ")
+            let more = bareSections.count > 8 ? " and \(bareSections.count - 8) more" : ""
+            parts.append("Under section\(bareSections.count == 1 ? "" : "s") \(shown)\(more) the result numbers paragraphs that carry no printed number in the PDF.")
+        }
+        guard !parts.isEmpty else { return nil }
+        parts.append("Compare those parts against the PDF, or re-drop the file to convert again.")
+        return parts.joined(separator: " ")
     }
 }
