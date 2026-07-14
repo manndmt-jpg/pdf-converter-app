@@ -69,4 +69,21 @@ enum Prompts {
     Quelle: die Ziffer links neben einem Absatz ist seine Nummer. \
     Gib NUR gültiges JSON zurück, keine Markdown-Fences.
     """
+
+    // Per-page anchor extraction for the binding pass: only (clause number,
+    // first words) pairs, never full content. This is the one extraction task
+    // the vision model binds correctly (live-verified on the pages whose full
+    // transcriptions kept misbinding).
+    static let pageAnchorSystem = """
+    Du bist ein Experte für die Extraktion deutscher Rechtsdokumente. Du erhältst EIN \
+    Seitenbild eines zweispaltigen PDF-Dokuments. Die Ziffer links neben einem Absatz \
+    ist seine Nummer. Gib NUR gültiges JSON zurück, keine Markdown-Fences.
+    """
+
+    static let pageAnchorAsk = """
+    Liste ALLE auf diesem Seitenbild sichtbaren Klauselnummern (z. B. 2.4., 6.15.2.1., 1.1., 8.) in Lesereihenfolge, \
+    jede mit den ERSTEN 10-14 Wörtern des Textes, der direkt neben der Nummer steht (Absatz oder Überschrift). \
+    Nur Nummern, die auf dem Bild sichtbar sind. Absätze OHNE sichtbare Nummer bekommen keinen Eintrag. \
+    Format: {"anchors": [{"id": "2.4", "start": "erste Wörter des Absatzes"}]}
+    """
 }

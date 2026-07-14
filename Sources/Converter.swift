@@ -195,8 +195,56 @@ struct Converter {
         // splicing that run into the answer by content match. Whatever is still
         // missing afterwards is surfaced to the user instead of silently shipped.
         let sourceText = chunks.joined(separator: "\n\n")
-        var missing = ClauseAudit.missingIds(source: sourceText, answer: markdown)
         var currentMerged = merged
+
+        // Binding pass: the text layer cannot say WHICH paragraph a clause
+        // number belongs to, so an answer can carry every id exactly once with
+        // whole runs shifted (a lead-in absorbed as the next clause, clauses
+        // merged at the end to make the count fit) — invisible to any id-set
+        // audit; 8 cross-references pointed at the wrong clause in a live
+        // answer that scored 100% id coverage. Per printed page, one small
+        // vision call extracts (clause number, first words) anchors — the one
+        // extraction the vision model binds correctly (live-verified) — and
+        // ClauseBinding re-cuts the answer's own text along those anchors.
+        if ClauseAudit.ids(in: sourceText).count >= ClauseAudit.minSourceIds,
+           let sections = currentMerged["sections"] as? [[String: Any]], !sections.isEmpty {
+            let bindPages = pages.filter {
+                !$0.localizedCaseInsensitiveContains("Inhaltsverzeichnis") && !ClauseAudit.ids(in: $0).isEmpty
+            }.compactMap { ClauseAudit.pageNumber(fromMarker: $0) }
+            if !bindPages.isEmpty {
+                progress("Checking clause numbering against the printed pages (\(bindPages.count) pages)", nil)
+                let anchors = try await extractAnchors(pageNumbers: bindPages, doc: doc)
+                // Always logged: when a block is skipped or misrepaired, the
+                // anchors are the evidence of what the pages actually said.
+                DebugLog.dump("binding-anchors",
+                              anchors.map { "\($0.id) | \($0.start.prefix(60))" }.joined(separator: "\n"))
+                if anchors.count >= 2 {
+                    let (rebound, blocks) = ClauseBinding.rebind(sections: sections, anchors: anchors)
+                    if blocks > 0 {
+                        var candidate = currentMerged
+                        candidate["sections"] = rebound
+                        let newMarkdown = MarkdownRenderer.render(candidate, sourceName: sourceName)
+                        let before = ClauseAudit.missingIds(source: sourceText, answer: Self.labelText(of: currentMerged) ?? markdown)
+                        let after = ClauseAudit.missingIds(source: sourceText, answer: Self.labelText(of: candidate) ?? newMarkdown)
+                        // Rebinding moves labels, never text, so the only ways it
+                        // can be wrong wholesale are a worse id inventory or a
+                        // shrunken render — both rejected here.
+                        if after.count <= before.count, newMarkdown.count >= totalChars * 2 / 5 {
+                            currentMerged = candidate
+                            markdown = newMarkdown
+                        } else {
+                            DebugLog.dump("binding-rejected", newMarkdown)
+                        }
+                    }
+                }
+            }
+        }
+
+        // The audit compares the source's clause ids against the answer's
+        // LABELS (section/subsection ids), not the rendered text: a merged
+        // clause keeps its number alive inside cross-references ("siehe Ziffer
+        // 2.10"), which masked structurally missing clauses from a text scan.
+        var missing = ClauseAudit.missingIds(source: sourceText, answer: Self.labelText(of: currentMerged) ?? markdown)
         if !missing.isEmpty, missing.count <= ClauseAudit.retryThreshold {
             progress("Numbering unclear around clause \(missing[0]), re-reading the affected pages", nil)
             let runs = Dictionary(grouping: missing) { $0.split(separator: ".").first.map(String.init) ?? $0 }
@@ -235,7 +283,7 @@ struct Converter {
                         var candidate = currentMerged
                         candidate["sections"] = spliced
                         let newMarkdown = MarkdownRenderer.render(candidate, sourceName: sourceName)
-                        let newMissing = ClauseAudit.missingIds(source: sourceText, answer: newMarkdown)
+                        let newMissing = ClauseAudit.missingIds(source: sourceText, answer: Self.labelText(of: candidate) ?? newMarkdown)
                         // Adopt each run's splice on its own merits: one failed
                         // splice must not poison another run's successful fix, and
                         // the length guard keeps a shrunken answer from winning.
@@ -268,7 +316,7 @@ struct Converter {
         }
         // The reverse audit: numbering the answer carries that the PDF does not.
         // Warn only — mutating content on suspicion is worse than flagging it.
-        let invented = ClauseAudit.inventedIds(source: sourceText, answer: markdown)
+        let invented = ClauseAudit.inventedIds(source: sourceText, answer: Self.labelText(of: currentMerged) ?? markdown)
         let bare = ClauseAudit.bareNumberedSections(
             sections: (currentMerged["sections"] as? [[String: Any]]) ?? [], source: sourceText)
         if !invented.isEmpty || !bare.isEmpty {
@@ -277,6 +325,76 @@ struct Converter {
         }
         return (markdown, ClauseAudit.warning(missing: missing, invented: invented,
                                               bareSections: bare, pageTexts: pages))
+    }
+
+    // The clause labels an answer actually claims, for the audits. Nil on the
+    // structureless fallback path (raw _markdown), where only a text scan is
+    // possible.
+    static func labelText(of merged: [String: Any]) -> String? {
+        guard merged["_markdown"] == nil,
+              let sections = merged["sections"] as? [[String: Any]], !sections.isEmpty else { return nil }
+        var labels: [String] = []
+        for section in sections {
+            if let id = section["id"] as? String { labels.append(id) }
+            for sub in (section["subsections"] as? [[String: Any]]) ?? [] {
+                if let id = sub["id"] as? String { labels.append(id) }
+            }
+        }
+        return labels.joined(separator: "\n")
+    }
+
+    // One small vision call per page: (clause number, first words) anchors for
+    // the binding pass. Pages render sequentially (PDFKit is not touched from
+    // concurrent tasks), the network calls run up to four at a time. A failed
+    // page is dumped and skipped — partial anchors are safe because
+    // ClauseBinding leaves any block it cannot fully re-anchor unchanged.
+    private func extractAnchors(pageNumbers: [Int], doc: PDFDocument) async throws -> [ClauseBinding.Anchor] {
+        var images: [(page: Int, base64: String)] = []
+        for n in pageNumbers {
+            guard let page = doc.page(at: n - 1), let png = Self.renderPNG(page: page, dpi: 200) else { continue }
+            images.append((n, png.base64EncodedString()))
+        }
+        var perPage: [Int: [ClauseBinding.Anchor]] = [:]
+        try await withThrowingTaskGroup(of: (Int, [ClauseBinding.Anchor]).self) { group in
+            var remaining = images[...]
+            func spawn(_ item: (page: Int, base64: String)) {
+                group.addTask {
+                    do {
+                        let response = try await chat(system: Prompts.pageAnchorSystem,
+                                                      userText: Prompts.pageAnchorAsk,
+                                                      pngBase64Images: [item.base64],
+                                                      maxAttempts: 2)
+                        let json = Self.parseJSON(response)
+                        let anchors = ((json["anchors"] as? [[String: Any]]) ?? []).compactMap { entry -> ClauseBinding.Anchor? in
+                            guard let id = entry["id"] as? String, !id.isEmpty,
+                                  let start = entry["start"] as? String, !start.isEmpty else { return nil }
+                            return ClauseBinding.Anchor(id: id, start: start)
+                        }
+                        if anchors.isEmpty { DebugLog.dump("binding-page-\(item.page)-empty", response) }
+                        return (item.page, anchors)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch let error as URLError where error.code == .cancelled {
+                        throw error
+                    } catch {
+                        DebugLog.dump("binding-page-\(item.page)-failed", String(describing: error))
+                        return (item.page, [])
+                    }
+                }
+            }
+            for item in remaining.prefix(4) { spawn(item) }
+            remaining = remaining.dropFirst(4)
+            while let (page, anchors) = try await group.next() {
+                perPage[page] = anchors
+                if let next = remaining.first {
+                    spawn(next)
+                    remaining = remaining.dropFirst()
+                }
+            }
+        }
+        // Page order preserved; within a page the model's order stands (it
+        // disambiguates Abschnitte that restart numbering on the same page).
+        return pageNumbers.flatMap { perPage[$0] ?? [] }
     }
 
     // MARK: - Text extraction

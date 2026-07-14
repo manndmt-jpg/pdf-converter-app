@@ -54,6 +54,14 @@ release script signs each nested binary individually.
   the decoupled number column; the check needs 24 chars of content anchor because
   12 let a cross-reference ("Ziffer 1. ausgeschlossen") vouch for unrelated
   paragraphs. Same standalone-compilable rule.
+- `ClauseBinding.swift` - Foundation-only: the vision-anchor binding pass. Per printed
+  page one small vision call extracts (clause number, first words) anchors — the one
+  extraction the vision model binds correctly (live-verified; full transcriptions of
+  the same pages kept misbinding). ClauseBinding.rebind re-CUTS the answer's own text
+  along located anchors (labels move, text never lost), per numbering block, with
+  all-or-nothing guards; when a model returns a whole document part as one giant
+  section, the block degrades to per-family segments so one unmatched anchor cannot
+  veto every repair. Same standalone-compilable rule.
 - `DebugLog.swift` - dumps unusable model answers to ~/Library/Logs/PDFConverter/
 - `Prompts.swift` - system prompts, verbatim from parse_contract.py
 - `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown(); v1.9.1
@@ -118,6 +126,20 @@ release script signs each nested binary individually.
 - Warnings and audit fallbacks are warn-only: never mutate content on suspicion.
   All audit dead-ends dump to ~/Library/Logs/PDFConverter/ (audit-images-empty,
   audit-splice-nil included — both paths used to exit silently).
+- THE BINDING LESSON (v1.12): an answer can carry every clause id exactly once and
+  still bind whole runs to the WRONG paragraphs (lead-in absorbed as the next clause,
+  runs shifted, clauses merged at the end so the count fits — 8 cross-references
+  pointed at the wrong clause in an answer that scored 100% id coverage). No id-set
+  audit can see this; only the printed page can. Hence the ALWAYS-ON binding pass
+  (ClauseBinding + Prompts.pageAnchorSystem, ~$0.02-0.04 and ~30-60s per doc, pages
+  with clause ids only, TOC pages skipped, 4 calls in flight).
+- The audits compare source ids against the answer's LABELS (Converter.labelText),
+  not its rendered text: cross-references ("siehe Ziffer 2.10") kept structurally
+  missing clauses invisible to a text scan. The raw-_markdown fallback path still
+  text-scans (no structure to read labels from).
+- Model sectioning is NONDETERMINISTIC: the same document has come back both as
+  per-clause sections ("## 6.7 ...") and as one giant "## Teil A" section. Nothing
+  may assume a particular section granularity.
 - `eval/` is the offline quality harness: `python3 eval/score.py <pdf> <md>` scores
   missing/invented/bare ids, duplicates, order flips, content recall. Run it after
   every prompt or pipeline change. Id extraction is a 1:1 port of ClauseAudit —

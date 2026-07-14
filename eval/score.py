@@ -59,9 +59,14 @@ def dehyphenate(text):
     """The PDF text layer breaks words at column edges ("Vor-\\nbereitung") and
     with soft hyphens; rejoin so word-level recall does not count them missing.
     A soft hyphen absorbs any following whitespace: it only ever sits inside a
-    word, so whatever follows it is the same word's continuation."""
+    word, so whatever follows it is the same word's continuation. A hyphen
+    between two lowercase letters is a line-break hyphen that survived the
+    reflow ("Vorsorgever-sicherung"); real German compounds continue with an
+    uppercase letter ("Spezial-Schadenersatz") or a space ("Buß- und") and are
+    left alone."""
     text = re.sub("­\\s*", "", text)
-    return re.sub(r"([a-zäöüß])-\s*\n\s*([a-zäöüß])", r"\1\2", text)
+    text = re.sub(r"([a-zäöüß])-\s*\n\s*([a-zäöüß])", r"\1\2", text)
+    return re.sub(r"([a-zäöüß])-([a-zäöüß])", r"\1\2", text)
 
 
 def long_words(text):
