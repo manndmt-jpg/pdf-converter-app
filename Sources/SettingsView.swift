@@ -131,7 +131,9 @@ struct SettingsView: View {
         Task {
             defer { isTestingKey = false }
             guard let creds = VertexCredentials.parse(credsJSON) else {
-                keyTestResult = "Invalid credentials JSON (needs client_id, client_secret, refresh_token)"
+                keyTestResult = "Invalid credentials JSON. Paste either a service account key "
+                    + "(client_email + private_key) or a gcloud login file "
+                    + "(client_id + client_secret + refresh_token)."
                 return
             }
             do {
@@ -150,6 +152,7 @@ struct SettingsView: View {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                 switch code {
                 case 200: keyTestResult = "OK — \(AppSettings.vertexModel) reachable in \(region)"
+                    + " as \(creds.describedIdentity)"
                 case 403: keyTestResult = "Access denied — check project IAM / Vertex AI API enabled"
                 case 404: keyTestResult = "Project or region not found"
                 default: keyTestResult = "HTTP \(code): \(String(data: data, encoding: .utf8)?.prefix(80) ?? "")"

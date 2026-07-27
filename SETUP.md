@@ -28,7 +28,24 @@ Done. Close Settings and drop a PDF onto the app window.
 
 ## 3. Option B: Vertex AI EU (for confidential documents)
 
-With this option the document content is processed by Google in the EU (Belgium) instead of being routed through a US service. Use this for anything sensitive. It requires access to our Google Cloud project, so there is a one-time setup with a terminal command. It looks scarier than it is.
+With this option the document content is processed by Google in the EU (Belgium) instead of being routed through a US service. Use this for anything sensitive. It needs access to our Google Cloud project, which comes in one of two forms.
+
+### The easy way: a key file from Dimitri (no Terminal)
+
+1. Ask Dimitri for a **Vertex service account key** (a small `.json` file) and the **project ID**
+2. Open the file in TextEdit and copy the whole contents
+3. Open PDF Converter Settings (**Cmd + ,**)
+4. Set **Provider** to **Vertex AI (EU)**
+5. Enter the **GCP Project ID** Dimitri gave you
+6. Leave **Region** as `europe-west1`
+7. Paste the file contents into the **Credentials JSON** field
+8. Click **Test Connection**. You should see "OK" followed by the account name
+
+Treat that file like a password: it grants access to our Google Cloud project. Keep it in a password manager, do not forward it, and tell Dimitri if it ever leaks so he can revoke it.
+
+### The other way: your own Google login (needs Terminal)
+
+Use this if you would rather authenticate as yourself than share a key. It looks scarier than it is.
 
 1. Ask Dimitri to add your Google account to the Google Cloud project
 2. Install the Google Cloud tools. Open the Terminal app and paste:

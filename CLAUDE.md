@@ -5,8 +5,9 @@
 Native macOS Dock app (SwiftUI, display name "PDF to MD AI Converter", bundle
 PDFConverter) that converts PDFs to structured German-legal Markdown via Gemini
 2.5 Flash (OpenRouter default, Vertex AI EU optional). GUI successor to
-`~/Projects/pdf-parser/parse_contract.py`; prompts and markdown rendering are
-ported 1:1 from there. Public repo: github.com/manndmt-jpg/pdf-converter-app.
+`~/Projects/pdf-parser/parse_contract.py`; prompts and rendering started as 1:1
+ports but have since diverged (quality pipeline: audits, binding pass, eval).
+Public repo: github.com/manndmt-jpg/pdf-converter-app.
 
 ## Build & run
 
@@ -63,16 +64,28 @@ release script signs each nested binary individually.
   section, the block degrades to per-family segments so one unmatched anchor cannot
   veto every repair. Same standalone-compilable rule.
 - `DebugLog.swift` - dumps unusable model answers to ~/Library/Logs/PDFConverter/
-- `Prompts.swift` - system prompts, verbatim from parse_contract.py
+- `Prompts.swift` - system prompts. Originally ported from parse_contract.py, but no
+  longer verbatim: v1.9+ added two-column rebinding, front-matter, and
+  never-number-unnumbered-paragraphs rules to structuredSystem, plus clauseRunSystem
+  (focused run re-extraction) and pageAnchorSystem/pageAnchorAsk (binding pass)
 - `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown(); v1.9.1
   added dedup (models return the same text as id AND title/content start) and
   trailing-dot normalization on subsection ids
 - `AppSettings.swift` / `SettingsView.swift` - backend picker (OpenRouter | Vertex AI EU),
   model, prompt, output folder (UserDefaults)
 - `Keychain.swift` - OpenRouter key storage
-- `VertexAuth.swift` - authorized_user JSON parsing + OAuth2 token refresh (cached actor),
-  ported from Meeting Scribe's GeminiService. Vertex config (project, region, credentials
-  JSON) lives in UserDefaults like Meeting Scribe. Only gemini-2.5-flash in europe-west1.
+- `VertexAuth.swift` - Vertex credentials + OAuth2 token minting (cached actor), originally
+  ported from Meeting Scribe's GeminiService. `VertexCredentials` is an enum over the TWO
+  shapes the same Settings field accepts, dispatched on which fields are present (not on
+  `type`, which old gcloud ADC files omit):
+  `authorizedUser` (client_id/client_secret/refresh_token, from `gcloud auth
+  application-default login`) uses a refresh_token grant; `serviceAccount`
+  (client_email/private_key, from a downloaded SA key) signs an RS256 JWT and uses the
+  jwt-bearer grant. JWT signing is Security.framework only (no deps): PEM -> strip PKCS#8
+  wrapper via a minimal DER walk -> SecKeyCreateWithData -> SecKeyCreateSignature. The SA
+  path (v1.13) exists so a colleague can be set up with one pasted file and no terminal.
+  Vertex config (project, region, credentials JSON) lives in UserDefaults like Meeting
+  Scribe. Only gemini-2.5-flash in europe-west1.
 
 ## Config
 

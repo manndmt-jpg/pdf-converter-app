@@ -23,7 +23,7 @@ enum ConversionError: LocalizedError {
         case .vertexNotConfigured:
             return "Vertex AI is not configured. Open Settings and add project ID and credentials."
         case .vertexAuthFailed:
-            return "Google token refresh failed. Re-run 'gcloud auth application-default login' and paste the new credentials JSON in Settings."
+            return "Google rejected the Vertex credentials. If you pasted a service account key, check it has not been deleted or disabled. If you pasted a gcloud login file, re-run 'gcloud auth application-default login' and paste the new JSON in Settings."
         case .unreadablePDF:
             return "File could not be opened as a PDF."
         case .encryptedPDF:
