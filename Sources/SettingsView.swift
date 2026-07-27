@@ -57,7 +57,7 @@ struct SettingsView: View {
                     TextField("GCP Project ID", text: $vertexProjectId)
                     TextField("Region", text: $vertexRegion)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Credentials JSON (from: gcloud auth application-default login)")
+                        Text("Credentials JSON (a service account key file, or the output of: gcloud auth application-default login)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         TextEditor(text: $vertexCredentialsJSON)
@@ -66,8 +66,11 @@ struct SettingsView: View {
                             .onChange(of: vertexCredentialsJSON) { _, _ in keyTestResult = nil }
                     }
                     HStack {
+                        // Only gate on an in-flight test: gating on field content kept the
+                        // button dark until a pasted field committed (Enter/Tab/focus change),
+                        // which read as "paste didn't work". Empty fields are reported on click.
                         Button(isTestingKey ? "Testing…" : "Test Connection") { testVertex() }
-                            .disabled(vertexProjectId.isEmpty || vertexCredentialsJSON.isEmpty || isTestingKey)
+                            .disabled(isTestingKey)
                         testResultLabel
                     }
                     Text("Model: \(AppSettings.vertexModel) (only model deployed in \(vertexRegion))")
@@ -130,6 +133,14 @@ struct SettingsView: View {
         let credsJSON = vertexCredentialsJSON
         Task {
             defer { isTestingKey = false }
+            guard !project.isEmpty else {
+                keyTestResult = "Enter the GCP Project ID first."
+                return
+            }
+            guard !credsJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                keyTestResult = "Paste the credentials JSON first."
+                return
+            }
             guard let creds = VertexCredentials.parse(credsJSON) else {
                 keyTestResult = "Invalid credentials JSON. Paste either a service account key "
                     + "(client_email + private_key) or a gcloud login file "
