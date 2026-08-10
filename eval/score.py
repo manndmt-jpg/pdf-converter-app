@@ -154,9 +154,10 @@ def load_source(path):
         return open(path, encoding="utf-8").read()
     here = os.path.dirname(os.path.abspath(__file__))
     dumper = os.path.join(tempfile.gettempdir(), "pdfconv_dump_text")
-    src = os.path.join(here, "dump_text.swift")
-    if not os.path.exists(dumper) or os.path.getmtime(dumper) < os.path.getmtime(src):
-        subprocess.run(["swiftc", "-O", "-o", dumper, src], check=True)
+    srcs = [os.path.join(here, "dump_text.swift"),
+            os.path.join(here, "..", "Sources", "PageFurniture.swift")]
+    if not os.path.exists(dumper) or os.path.getmtime(dumper) < max(map(os.path.getmtime, srcs)):
+        subprocess.run(["swiftc", "-O", "-o", dumper] + srcs, check=True)
     return subprocess.run([dumper, path], check=True, capture_output=True, text=True).stdout
 
 

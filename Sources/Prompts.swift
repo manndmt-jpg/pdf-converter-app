@@ -10,8 +10,8 @@ enum Prompts {
     Return valid JSON with this format:
     {
       "title": "document title",
-      "reference": "file reference / Aktenzeichen",
-      "date": "date of notarization",
+      "reference": "file reference / Aktenzeichen, ONLY if the document prints one; otherwise \"\"",
+      "date": "document date as printed (a 'Stand' month/year, or the date of notarization)",
       "notary": "notary name and location",
       "parties": [{"name": "", "role": "", "details": "address, registration, etc."}],
       "sections": [
@@ -34,7 +34,13 @@ enum Prompts {
     - Preserve the EXACT section numbering from the document (§1, §2, etc. and their subsections 1., 2., 3., etc.)
     - The text often comes from a two-column PDF whose text layer separates clause numbers from their paragraphs: you may see runs of bare clause numbers (e.g. "2.7. 2.8. 2.9. 2.10.") dumped together, away from the texts they belong to. Rebind every clause number to its correct paragraph. Use the document's own table of contents (Inhaltsverzeichnis) and its internal cross-references (e.g. "Ziffer 6.25") as the authoritative numbering map. Never invent or shift numbering; every clause number that appears in the document must appear exactly once as a section/subsection id.
     - Use a number as a subsection id ONLY if the document prints that exact number. Many paragraphs have NO printed number (e.g. explanatory paragraphs under a numbered clause): append such a paragraph to the content of the preceding numbered subsection, or use an empty id "" if no numbered subsection precedes it in the section. NEVER generate sequence numbers (1., 2., 3.) for unnumbered paragraphs.
-    - Include ALL front matter as sections: cover notes (e.g. "Hinweise zum Aufbau und zur Anwendung") and the complete table of contents, before the body sections.
+    - Include ALL front matter as sections before the body sections — cover notes (e.g. "Hinweise zum Aufbau und zur Anwendung") and running text — EXCEPT the table of contents: use the Inhaltsverzeichnis only as the numbering map; do NOT reproduce the table of contents itself in the output.
+    - Front matter that is running text (e.g. the Versicherer/insurer block of insurance conditions) must be reproduced VERBATIM and COMPLETELY as a leading section with id "" and title "": one subsection per paragraph, each with id "". Do NOT restructure such prose into the "parties" list, do NOT invent headings for it, and do NOT drop any of its paragraphs. Use "parties" only when the document itself presents a formal list of parties (e.g. a notarial deed); otherwise leave "parties" empty.
+    - Repeating page headers/footers (the same short lines recurring on many pages, e.g. "Stand", a month/year, a product name, page counters like "12 / 67") are page furniture, NOT content: never copy them into "reference", "sections", or "parties". A printed "Stand <Monat Jahr>" may fill the "date" field.
+    - When the document numbers its clauses hierarchically (1.1, 2.7, 6.15.2), each numbered clause with a printed heading becomes its own section (id = the printed number, title = the printed heading), and printed lettered items inside a clause (a., b., c.) become that section's subsections with the letter as id (e.g. "a"). Do NOT fold several numbered clauses into one section's content. Deeper printed enumerators ((i), (ii), aa.) may be their own subsections (id exactly as printed, e.g. "(i)") when the document prints them as separate list items, or stay verbatim inside their item's content — they must NEVER be lost.
+    - Preserve the document's paragraph breaks INSIDE a subsection's content as \\n line breaks. Do not join separately printed paragraphs into one continuous line.
+    - The text contains page markers ("--- Seite N von M ---"). Text cut by a page break CONTINUES after the marker. Label-less text directly after a marker continues the item that was open before the break. A line that starts with a NEW enumerator or clause number (e.g. "c." after "b.", or "1.3" after "1.2") is a NEW item of the enumeration that was open before the break: keep it with its own label in its proper place. Never drop such an item, never merge it into the previous item, and never attach it to the following heading.
+    - Preserve printed inline enumerators — (i), (ii), a., b., 1., 2. — verbatim inside content. Never flatten an enumerated list into prose and never renumber it.
     - Keep ALL text in the ORIGINAL LANGUAGE (German). Do NOT translate.
     - Do NOT summarize. Include the FULL content of every subsection.
     - If a subsection is long, include it in full — do not truncate.

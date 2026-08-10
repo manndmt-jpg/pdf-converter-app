@@ -63,14 +63,78 @@ release script signs each nested binary individually.
   all-or-nothing guards; when a model returns a whole document part as one giant
   section, the block degrades to per-family segments so one unmatched anchor cannot
   veto every repair. Same standalone-compilable rule.
+- `PageFurniture.swift` - Foundation-only: strips repeating page headers/footers from
+  the text layer before the model sees it. PDFKit interleaves footers MID-SENTENCE at
+  every page break; observed live (Tarif L/M insurance conditions, 2026-08-10): the
+  footer sat between items "b." and "c." of Ziffer 1.2 and the model dropped "c." (L)
+  or misfiled it under 1.3 (M); the same footer got promoted into a fabricated
+  front-matter "Aktenzeichen" line. Repetition threshold: >= half the pages, min 3;
+  digit runs normalized so page counters ("8 / 67") match across pages; lines with
+  < 4 letters never stripped (two-column number columns "2.7. 2.8." and enumerators
+  "(i)" repeat across pages and must survive); the FIRST occurrence of each footer
+  line is kept (footers are the only place these docs print their date, "Stand Juni
+  2026"). Same standalone-compilable rule.
+- `OrphanItemAudit.swift` - Foundation-only: the enumeration-item BACKSTOP. Even
+  with the footer stripped and prompt rules in place, the model nondeterministically
+  drops or label-less-merges printed enumeration items — most often the item whose
+  text starts a PDF page (three consecutive live runs of one doc: dropped / fused
+  into "b." / "## c." own-section), but also whole MID-PAGE runs ((ii)-(v) of 2.4
+  vanished in a run that scored 100% on the numeric audit). This audit lists EVERY
+  line-start item ("c. …", "(ii) …") straight from the text layer (line-start
+  enumerators with >= 8 same-line chars are the RELIABLE adjacency case; bare label
+  lines are the two-column number column and are ignored), then verifies each
+  against the parsed answer: present+labeled anywhere (own subsection or inline)
+  -> untouched; fused label-less -> split out and labeled; absent -> re-inserted
+  verbatim after the preceding item (dropped runs chain: each inserted item anchors
+  the next); unplaceable -> user-facing warning. Insertion never targets a section
+  already carrying the item's id (sibling sections share word-identical items —
+  1.1 b. == 1.2 b. live) and prefers the anchor whose id matches the source's
+  preceding token. Fingerprints are opening-word prefixes and German boilerplate
+  reuses openings (front matter "Alle für den Versicherer…" == clause 10.8 a. for
+  32 chars, live): an item counts as present if ANY hit carries its label, and the
+  verbatim front-matter block is never relabeled. Repairs only re-cut or re-insert
+  the document's own printed text. Two more live-observed shapes it fixes: a
+  LABELED item misfiled as the first subsection of the FOLLOWING section (ahead
+  of that section's own "a.") is moved back after its anchor — that exact
+  signature only; and recoverLeadingFrontMatter restores a dropped
+  Versicherer/Alteos front-matter block (2 of 3 consecutive runs lost it):
+  the prose run directly above the body start on the body-start page, restored
+  verbatim into the leading front-matter section only when missing (TOC lines
+  self-exclude via their digit-only page-number lines). Same
+  standalone-compilable rule (needs ClauseAudit).
 - `DebugLog.swift` - dumps unusable model answers to ~/Library/Logs/PDFConverter/
 - `Prompts.swift` - system prompts. Originally ported from parse_contract.py, but no
   longer verbatim: v1.9+ added two-column rebinding, front-matter, and
   never-number-unnumbered-paragraphs rules to structuredSystem, plus clauseRunSystem
-  (focused run re-extraction) and pageAnchorSystem/pageAnchorAsk (binding pass)
+  (focused run re-extraction) and pageAnchorSystem/pageAnchorAsk (binding pass).
+  v1.14 (2026-08-10): page-furniture rule, page-break continuation rule (a NEW
+  enumerator after a page marker is a NEW item, not a continuation of the previous
+  one — the first wording caused "c." to be merged into "b."), verbatim front matter
+  (running-text front matter as a leading section with id ""/title "", never
+  restructured into "parties" — restructuring is what dropped the "Alle für den
+  Versicherer..." paragraph and invented a ROLAND front-matter entry), clause
+  granularity (each numbered clause = own section, lettered items = subsections),
+  keep-inline-enumerators ((i)/(ii)), and the TOC is now EXCLUDED from the output.
+  The TOC exclusion supersedes the v1.9 include-TOC rule: the model reads the TOC as
+  input for the numbering map either way, but TOC ids in the ANSWER's labels would
+  blind ClauseAudit.missingIds (the audit reads labels), and old runs omitted the
+  TOC anyway.
 - `MarkdownRenderer.swift` - JSON -> markdown, port of result_to_markdown(); v1.9.1
   added dedup (models return the same text as id AND title/content start) and
-  trailing-dot normalization on subsection ids
+  trailing-dot normalization on subsection ids. v1.14: same trailing-dot
+  normalization on SECTION headings ("## 1." vs "## 1" varied per run, also when the
+  number arrives inside the title); a section with empty id AND empty title is the
+  verbatim front-matter block and renders WITHOUT a heading (no more invented
+  "## Beteiligte" — that heading came from the renderer whenever parties was
+  non-empty), with a printed "Versicherer:"-style label prefix bolded; the date
+  field renders as "**Stand:**" (was "Datum" — these documents print "Stand";
+  one-word revert in the field/label list if notarial docs ever matter again).
+  Also structure normalizers used by Converter pre-render:
+  demoteStrayLetterSections (a "## c." section following a letter enumeration is
+  the page-break orphan promoted to a heading — folded back in) and
+  dropDuplicatedEnumerationSubs (model emitted an enumeration BOTH as label-less
+  prose in the parent item AND as "(i)"/"(ii)" subsections, live on 2.7 a. —
+  the labeled duplicates are dropped and OrphanItemAudit re-splits the prose)
 - `AppSettings.swift` / `SettingsView.swift` - backend picker (OpenRouter | Vertex AI EU),
   model, prompt, output folder (UserDefaults)
 - `Keychain.swift` - OpenRouter key storage
@@ -157,7 +221,11 @@ release script signs each nested binary individually.
   missing/invented/bare ids, duplicates, order flips, content recall. Run it after
   every prompt or pipeline change. Id extraction is a 1:1 port of ClauseAudit —
   keep them in sync. `eval/corpus/` (golden PDFs) is gitignored: public repo, no
-  third-party documents.
+  third-party documents. `eval/test_regressions.swift` is the no-API regression
+  suite (page-break clause loss + renderer rules; compile command in eval/README).
+  `eval/convert_cli.swift` runs the full in-app pipeline headless (OpenRouter key
+  from env or Keychain). `eval/dump_text.swift` mirrors Converter.extractPages
+  INCLUDING the PageFurniture strip — keep all three in sync with Sources/.
 
 ## UI (v1.3+ redesign)
 

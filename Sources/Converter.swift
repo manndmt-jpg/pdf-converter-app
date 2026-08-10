@@ -95,7 +95,7 @@ struct Converter {
         let pageCount = doc.pageCount
         guard pageCount > 0 else { throw ConversionError.emptyPDF }
 
-        let pages = extractPages(doc: doc)
+        let (pages, furnitureKeys) = extractPages(doc: doc)
         let sourceName = url.deletingPathExtension().lastPathComponent
         let result: (markdown: String, warning: String?)
 
@@ -103,12 +103,12 @@ struct Converter {
             result = (try await convertScanned(doc: doc, sourceName: sourceName, progress: progress), nil)
         } else {
             do {
-                result = try await convertTextLayer(pages: pages, pageCount: pageCount, doc: doc, sourceName: sourceName, forceSplit: false, progress: progress)
+                result = try await convertTextLayer(pages: pages, pageCount: pageCount, doc: doc, sourceName: sourceName, furnitureKeys: furnitureKeys, forceSplit: false, progress: progress)
             } catch ConversionError.responseTruncated where pages.count > 1 {
                 // The one-pass answer would not fit or never came back as valid JSON
                 // even after re-asks. Halve the request: smaller answers stay far from
                 // the token cap and are much less likely to contain broken JSON.
-                result = try await convertTextLayer(pages: pages, pageCount: pageCount, doc: doc, sourceName: sourceName, forceSplit: true, progress: progress)
+                result = try await convertTextLayer(pages: pages, pageCount: pageCount, doc: doc, sourceName: sourceName, furnitureKeys: furnitureKeys, forceSplit: true, progress: progress)
             }
         }
 
@@ -119,7 +119,7 @@ struct Converter {
 
     // MARK: - Text-layer path (structured JSON, chunked when large)
 
-    private func convertTextLayer(pages: [String], pageCount: Int, doc: PDFDocument, sourceName: String, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> (markdown: String, warning: String?) {
+    private func convertTextLayer(pages: [String], pageCount: Int, doc: PDFDocument, sourceName: String, furnitureKeys: Set<String>, forceSplit: Bool, progress: @escaping @Sendable (String, Double?) -> Void) async throws -> (markdown: String, warning: String?) {
         let totalChars = pages.reduce(0) { $0 + $1.count }
         let maxChars = forceSplit
             ? min(DocumentChunker.maxChunkChars / 2, totalChars / 2)
@@ -173,7 +173,45 @@ struct Converter {
                 }
             }
         }
-        let merged = parsed.count == 1 ? parsed[0] : DocumentChunker.merge(parsed)
+        var merged = parsed.count == 1 ? parsed[0] : DocumentChunker.merge(parsed)
+        // The kept first footer occurrence still gets promoted into a fabricated
+        // "reference" now and then (prompt rules alone did not stop it). A
+        // reference that is nothing but footer lines is scrubbed; a real
+        // printed Aktenzeichen has content of its own and survives.
+        if let ref = merged["reference"] as? String, PageFurniture.isFurniture(ref, keys: furnitureKeys) {
+            merged["reference"] = ""
+        }
+        // A page-break orphan sometimes comes back as its own section
+        // ("## c. einer bisher…"); demote it into the enumeration it fell
+        // out of before rendering and before the audits read labels.
+        if let sections = merged["sections"] as? [[String: Any]] {
+            merged["sections"] = MarkdownRenderer.dropDuplicatedEnumerationSubs(
+                MarkdownRenderer.demoteStrayLetterSections(sections))
+        }
+        // The enumeration-item backstop: every printed line-start item is
+        // verified against the answer and, when dropped or fused label-less
+        // into another item, restored from the text layer itself (models drop
+        // these nondeterministically; prompt rules alone did not hold across
+        // runs — page-leading items AND whole mid-page runs were lost live).
+        var unresolvedOrphans: [OrphanItemAudit.Item] = []
+        if let sections = merged["sections"] as? [[String: Any]] {
+            // The verbatim front-matter block itself gets dropped now and then
+            // (two of three consecutive live runs); restore missing leading
+            // prose from the body-start page before the item audit runs.
+            merged["sections"] = OrphanItemAudit.recoverLeadingFrontMatter(sections: sections, pages: pages)
+        }
+        if let sections = merged["sections"] as? [[String: Any]] {
+            let orphans = OrphanItemAudit.items(pages: pages)
+            if !orphans.isEmpty {
+                let repaired = OrphanItemAudit.repair(sections: sections, items: orphans)
+                merged["sections"] = repaired.sections
+                unresolvedOrphans = repaired.unresolved
+                if !unresolvedOrphans.isEmpty {
+                    DebugLog.dump("orphan-items-unresolved",
+                                  unresolvedOrphans.map { "\($0.token) p\($0.page) | \($0.text.prefix(80))" }.joined(separator: "\n"))
+                }
+            }
+        }
         var markdown = MarkdownRenderer.render(merged, sourceName: sourceName)
         // The prompt forbids summarizing, so a faithful answer is roughly as long as
         // the source (measured: 126K chars rendered from 125.7K source). A drastically
@@ -323,8 +361,15 @@ struct Converter {
             DebugLog.dump("clause-audit-invented",
                           "invented: \(invented.joined(separator: ", ")) | bare-numbered sections: \(bare.joined(separator: ", "))")
         }
-        return (markdown, ClauseAudit.warning(missing: missing, invented: invented,
-                                              bareSections: bare, pageTexts: pages))
+        var warningText = ClauseAudit.warning(missing: missing, invented: invented,
+                                              bareSections: bare, pageTexts: pages)
+        if !unresolvedOrphans.isEmpty {
+            let listed = unresolvedOrphans.prefix(6)
+                .map { "\"\($0.token)\" (PDF page \($0.page))" }.joined(separator: ", ")
+            let extra = "List item\(unresolvedOrphans.count == 1 ? "" : "s") \(listed) start\(unresolvedOrphans.count == 1 ? "s" : "") a page in the PDF but could not be verified in the result — compare that spot against the PDF."
+            warningText = [warningText, extra].compactMap { $0 }.joined(separator: " ")
+        }
+        return (markdown, warningText)
     }
 
     // The clause labels an answer actually claims, for the audits. Nil on the
@@ -399,15 +444,28 @@ struct Converter {
 
     // MARK: - Text extraction
 
-    private func extractPages(doc: PDFDocument) -> [String] {
-        var parts: [String] = []
+    private func extractPages(doc: PDFDocument) -> (pages: [String], furnitureKeys: Set<String>) {
+        var raw: [(page: Int, text: String)] = []
         for i in 0..<doc.pageCount {
             guard let text = doc.page(at: i)?.string,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { continue }
-            parts.append("--- Seite \(i + 1) von \(doc.pageCount) ---\n\(text)")
+            raw.append((i + 1, text))
         }
-        return parts
+        // Repeating headers/footers land mid-sentence at every page break and
+        // made the model drop or misfile the item that continues after the
+        // break (observed live: Ziffer 1.2 c.). Strip the repeats; keep the
+        // markers — audits map ids to PDF pages through them. The keys travel
+        // along so the answer's "reference" field can be scrubbed of footer
+        // text the model promotes despite the prompt.
+        let keys = PageFurniture.keys(pages: raw.map(\.text))
+        let stripped = PageFurniture.strip(pages: raw.map(\.text))
+        let pages: [String] = zip(raw, stripped).compactMap { item, text in
+            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : "--- Seite \(item.page) von \(doc.pageCount) ---\n\(text)"
+        }
+        return (pages, keys)
     }
 
     // MARK: - Scanned path (per-page Gemini Vision OCR)
