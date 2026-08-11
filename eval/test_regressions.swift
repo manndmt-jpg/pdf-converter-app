@@ -3,7 +3,7 @@ import Foundation
 // Offline regression tests for the deterministic pipeline pieces.
 //
 //   swiftc -parse-as-library -o /tmp/pdfconv_tests eval/test_regressions.swift \
-//       Sources/{PageFurniture,MarkdownRenderer,ClauseAudit,OrphanItemAudit}.swift && /tmp/pdfconv_tests
+//       Sources/{PageFurniture,MarkdownRenderer,ClauseAudit,OrphanItemAudit,NumberingScope}.swift && /tmp/pdfconv_tests
 //
 // The page-break fixture reproduces the live 2026-08-10 failure (Tarif L/M
 // insurance conditions): PDFKit interleaves the repeating page footer directly
@@ -364,6 +364,209 @@ struct TestRegressions {
         ] + fmDropped, pages: fmPages)
         expect(((fmPresent.first?["subsections"] as? [[String: Any]]) ?? []).count == 2,
                "present front matter is left untouched (no duplicates appended)")
+
+        // Decomposed (NFD) content must not shift the fused-item cut: the
+        // split index is counted in unicode scalars, or every combining mark
+        // before the item start moves the cut early and corrupts both halves.
+        let nfdFused: [[String: Any]] = [
+            ["id": "1.2", "title": "bei Paaren", "subsections": [
+                ["id": "b", "content": ("Schäden des Ehegatten und die Gewährleistung üblicher Pflichten; einer bisher in häuslicher Gemeinschaft lebenden Person bis zu drei Monate nach Auszug, soweit aus einer anderen Versicherung kein Ersatz verlangt werden kann.").decomposedStringWithCanonicalMapping],
+            ]],
+        ]
+        let nfdRepaired = OrphanItemAudit.repair(sections: nfdFused, items: [itemC])
+        let nfdSubs = (nfdRepaired.sections.first?["subsections"] as? [[String: Any]]) ?? []
+        expect(nfdSubs.count == 2 && (nfdSubs.last?["id"] as? String) == "c"
+                   && ((nfdSubs.last?["content"] as? String) ?? "").hasPrefix("einer bisher")
+                   && ((nfdSubs.first?["content"] as? String) ?? "").hasSuffix("Pflichten;"),
+               "NFD content is cut at the exact fused-item start (scalar-counted index)")
+
+        // MARK: - NumberingScope: flattened numbering scopes (AHB Stichentscheid)
+
+        // The AHB live shape: Abschnitt 3 clauses 1.–8., then the ROLAND block's
+        // "Stichentscheid" scope restarts at 1. under a printed keyword heading
+        // the model absorbed into clause 8's tail. Page shape mirrors the real
+        // text layer: decoupled number column, heading line, run paragraphs.
+        let scopePages = [
+            "--- Seite 11 von 17 ---\n1. 1.1. 1.2. 1.3.\nKosten, die er bei einer Rechtsschutzbestätigung vor Einleitung dieser\nMaßnahmen zu tragen hätte.\nStichentscheid\nLehnt der Versicherer den Rechtsschutz ab,\n weil der durch die Wahrnehmung der rechtlichen Interessen voraussicht-\nlich entstehende Kostenaufwand in einem groben Missverhältnis zum angestrebten Erfolg steht oder\n2. 3.  Hat der Versicherer seine Leistungspflicht gemäß Absatz (1) verneint und\nstimmt die versicherte Person der Auffassung des Versicherers nicht zu,",
+        ]
+        let flattened: [[String: Any]] = [
+            ["id": "", "title": "Abschnitt 3 – Forderungsausfallrisiko", "subsections": [
+                ["id": "1", "content": "Gegenstand der Forderungsausfalldeckung Der Versicherer gewährt Versicherungsschutz für den Fall, dass eine versicherte Person geschädigt wird."],
+                ["id": "7", "content": "Ausschlussfrist Alle Ansprüche aus dieser Ausfalldeckung verfallen nach drei Jahren."],
+                ["id": "8", "content": "Spezial-Schadenersatzrechtsschutz Kosten, die er bei einer Rechtsschutzbestätigung vor Einleitung dieser Maßnahmen zu tragen hätte. Stichentscheid"],
+                ["id": "1", "content": "Lehnt der Versicherer den Rechtsschutz ab,"],
+                ["id": "1.1", "content": "weil der durch die Wahrnehmung der rechtlichen Interessen voraussichtlich entstehende Kostenaufwand in einem groben Missverhältnis zum angestrebten Erfolg steht oder"],
+                ["id": "2", "content": "Hat der Versicherer seine Leistungspflicht gemäß Absatz (1) verneint und stimmt die versicherte Person der Auffassung des Versicherers nicht zu,"],
+                ["id": "3", "content": "Der Versicherer kann der versicherten Person eine Frist von mindestens einem Monat setzen."],
+            ]],
+        ]
+        let scoped = NumberingScope.split(sections: flattened, pages: scopePages)
+        let scopedA = (scoped.sections.first?["subsections"] as? [[String: Any]]) ?? []
+        let scopedB = scoped.sections.count > 1 ? ((scoped.sections[1]["subsections"] as? [[String: Any]]) ?? []) : []
+        expect(scoped.sections.count == 2 && scoped.scopes == ["Stichentscheid"],
+               "the restarted Stichentscheid run is split into its own section")
+        expect((scoped.sections.count > 1 ? scoped.sections[1]["title"] as? String : nil) == "Stichentscheid"
+                   && (scoped.sections.count > 1 ? scoped.sections[1]["id"] as? String : nil) == "",
+               "the new section is titled with the document's own heading line")
+        expect(scopedA.count == 3 && scopedB.count == 4
+                   && (scopedB.first?["id"] as? String) == "1"
+                   && (scopedA.last?["content"] as? String)?.hasSuffix("zu tragen hätte.") == true,
+               "the absorbed heading is stripped from clause 8's tail; no text is lost")
+        let rescoped = NumberingScope.split(sections: scoped.sections, pages: scopePages)
+        expect(rescoped.sections.count == 2 && rescoped.scopes.isEmpty,
+               "the split is idempotent")
+
+        // Invented numbering under running prose must NOT split: the candidate
+        // "heading" is a wrap line, betrayed by its predecessor stopping
+        // mid-sentence (no terminal punctuation).
+        let wrapPages = [
+            "--- Seite 3 von 9 ---\nDer Vertrag endet, wenn der Versicherer dies erklärt und dass eine\nVersicherungsleistung im Übrigen nicht erbracht wird\nLehnt der Versicherer die Leistung ohne Angabe von Gründen vollständig ab,\nso gilt das Weitere.",
+        ]
+        let wrapped: [[String: Any]] = [
+            ["id": "6", "title": "Kündigung", "subsections": [
+                ["id": "6.1", "content": "Der Vertrag endet, wenn der Versicherer dies erklärt und dass eine Versicherungsleistung im Übrigen nicht erbracht wird"],
+                ["id": "1", "content": "Lehnt der Versicherer die Leistung ohne Angabe von Gründen vollständig ab,"],
+                ["id": "2", "content": "so gilt das Weitere."],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: wrapped, pages: wrapPages).scopes.isEmpty,
+               "a wrap line of running prose is never promoted to a scope heading")
+
+        // A colon lead-in ("gelten folgende Bestimmungen:") introduces a nested
+        // list, not a new scope — rejected by its terminal punctuation.
+        let colonPages = [
+            "--- Seite 4 von 9 ---\nDie Beitragsanpassung erfolgt jährlich.\nFür die Beitragsanpassung gelten folgende Bestimmungen:\nDer Beitrag wird unter Berücksichtigung der Kalkulationsunterlagen ermittelt.\nDer Versicherer überprüft jährlich die kalkulierten Werte der Bestandsgruppen.",
+        ]
+        let colonLed: [[String: Any]] = [
+            ["id": "2", "title": "Anpassung des Beitrages", "subsections": [
+                ["id": "2.1", "content": "Für die Beitragsanpassung gelten folgende Bestimmungen:"],
+                ["id": "1", "content": "Der Beitrag wird unter Berücksichtigung der Kalkulationsunterlagen ermittelt."],
+                ["id": "2", "content": "Der Versicherer überprüft jährlich die kalkulierten Werte der Bestandsgruppen."],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: colonLed, pages: colonPages).scopes.isEmpty,
+               "a colon lead-in above a restarted list is not a scope heading")
+
+        // A numeric decrease that does not restart at exactly 1. is a model
+        // error, not a scope — even when a perfectly valid printed heading
+        // sits above the decreased run (this makes the restart-at-1 guard the
+        // ONLY thing preventing the split, so deleting it fails this test).
+        let notOnePages = [
+            "--- Seite 6 von 9 ---\nDie fünfte Bestimmung ist hiermit vollständig abgeschlossen worden.\nSonderbedingungen\nDie dritte Bestimmung regelt die verbleibenden Sonderfälle im Einzelnen.\nDie vierte Bestimmung ergänzt sie um die technischen Einzelheiten dazu.",
+        ]
+        let notOne: [[String: Any]] = [
+            ["id": "", "title": "T", "subsections": [
+                ["id": "1", "content": "Die erste Bestimmung gilt hier mit eigenem Wortlaut für den Abgleich."],
+                ["id": "2", "content": "Die zweite Bestimmung gilt ebenfalls mit eigenem Wortlaut hierzu."],
+                ["id": "5", "content": "Die fünfte Bestimmung ist hiermit vollständig abgeschlossen worden."],
+                ["id": "3", "content": "Die dritte Bestimmung regelt die verbleibenden Sonderfälle im Einzelnen."],
+                ["id": "4", "content": "Die vierte Bestimmung ergänzt sie um die technischen Einzelheiten dazu."],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: notOne, pages: notOnePages).scopes.isEmpty,
+               "a numeric decrease that does not restart at 1 never splits, heading or not")
+
+        // A restarted run that is not strictly ascending (1., 3., 2.) is a
+        // misbound answer — again with a valid heading above, so the
+        // ascending-run veto is what this test observes.
+        let misorderedPages = [
+            "--- Seite 7 von 9 ---\nDie zweite Bestimmung ist hiermit vollständig abgeschlossen worden.\nSonderbedingungen\nDie erste Regel des neuen Abschnitts steht hier mit eigenem Wortlaut.\nDie dritte Regel folgt direkt darauf mit genügend eigenem Wortlaut.\nDie zweite Regel kommt in dieser Antwort zu spät und beweist den Fehler.",
+        ]
+        let misordered: [[String: Any]] = [
+            ["id": "", "title": "T", "subsections": [
+                ["id": "1", "content": "Die erste Bestimmung gilt hier mit eigenem Wortlaut für den Abgleich."],
+                ["id": "2", "content": "Die zweite Bestimmung ist hiermit vollständig abgeschlossen worden."],
+                ["id": "1", "content": "Die erste Regel des neuen Abschnitts steht hier mit eigenem Wortlaut."],
+                ["id": "3", "content": "Die dritte Regel folgt direkt darauf mit genügend eigenem Wortlaut."],
+                ["id": "2", "content": "Die zweite Regel kommt in dieser Antwort zu spät und beweist den Fehler."],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: misordered, pages: misorderedPages).scopes.isEmpty,
+               "a restarted run that is not strictly ascending never splits")
+
+        // Decomposed page text (NFD umlauts, as some PDF producers emit):
+        // the cut index must be counted in unicode scalars, or every
+        // combining mark before the match shifts the heading one char early
+        // ("Stichentschei" instead of "Stichentscheid", live-reproduced).
+        let nfdScoped = NumberingScope.split(
+            sections: flattened, pages: scopePages.map { $0.decomposedStringWithCanonicalMapping })
+        let nfdA = (nfdScoped.sections.first?["subsections"] as? [[String: Any]]) ?? []
+        expect(nfdScoped.scopes == ["Stichentscheid"]
+                   && (nfdA.last?["content"] as? String)?.hasSuffix("zu tragen hätte.") == true,
+               "decomposed (NFD) page text yields the full verbatim heading and a clean tail strip")
+
+        // The same opening printed twice on one page under DIFFERENT headings:
+        // we cannot know which occurrence is the restarted run, so no split —
+        // checking only the first occurrence would title the scope wrong.
+        let twicePages = [
+            "--- Seite 8 von 9 ---\nDie vorige Bestimmung ist hiermit vollständig abgeschlossen worden.\nVertragsrechtsschutz\nLehnt der Versicherer den Rechtsschutz ab, so gilt das Folgende hier.\nDiese Regel ist damit ebenfalls vollständig abgeschlossen worden.\nStichentscheid\nLehnt der Versicherer den Rechtsschutz ab, so gilt das Folgende hier.\nDie weitere Regel schließt sich mit eigenem Wortlaut direkt an.",
+        ]
+        let twice: [[String: Any]] = [
+            ["id": "", "title": "T", "subsections": [
+                ["id": "1", "content": "Die vorige Bestimmung ist hiermit vollständig abgeschlossen worden."],
+                ["id": "2", "content": "Diese Regel ist damit ebenfalls vollständig abgeschlossen worden."],
+                ["id": "1", "content": "Lehnt der Versicherer den Rechtsschutz ab, so gilt das Folgende hier."],
+                ["id": "2", "content": "Die weitere Regel schließt sich mit eigenem Wortlaut direkt an."],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: twice, pages: twicePages).scopes.isEmpty,
+               "a repeated opening under different headings vetoes the split")
+
+        // An abbreviation period ("… des BGB, HGB u. a.") ends no sentence:
+        // the line after it is a wrap line, not a heading.
+        let abbrevPages = [
+            "--- Seite 5 von 12 ---\nVersichert sind Ansprüche nach den Vorschriften des BGB, HGB u. a.\nRechtsvorschriften soweit sie im Inland unmittelbar gelten\nLehnt der Versicherer die Leistung ohne jede Begründung vollständig ab,\nso kann der Versicherungsnehmer binnen eines Monats Widerspruch einlegen.",
+        ]
+        let abbrev: [[String: Any]] = [
+            ["id": "6.7", "title": "Ausschlüsse", "subsections": [
+                ["id": "6.7.1", "content": "Versichert sind Ansprüche nach den Vorschriften des BGB, HGB u. a. Rechtsvorschriften soweit sie im Inland unmittelbar gelten"],
+                ["id": "1", "content": "Lehnt der Versicherer die Leistung ohne jede Begründung vollständig ab,"],
+                ["id": "2", "content": "so kann der Versicherungsnehmer binnen eines Monats Widerspruch einlegen."],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: abbrev, pages: abbrevPages).scopes.isEmpty,
+               "a wrap line after an abbreviation period is never promoted to a heading")
+
+        // Clause-level punctuation inside the candidate line marks running
+        // prose even when the line above it ends a real sentence.
+        let commaPages = [
+            "--- Seite 5 von 12 ---\nDiese Regelung ist damit abschließend und vollständig beschrieben worden.\nRechtsvorschriften, soweit sie im Inland unmittelbar gelten\nLehnt der Versicherer die Leistung ohne jede Begründung vollständig ab,\nso kann der Versicherungsnehmer binnen eines Monats Widerspruch einlegen.",
+        ]
+        expect(NumberingScope.split(sections: abbrev, pages: commaPages).scopes.isEmpty,
+               "a candidate line with clause-level punctuation is never a heading")
+
+        // A rendered TOC restarts numbering per Abschnitt by design.
+        let toc: [[String: Any]] = [
+            ["id": "", "title": "Inhaltsverzeichnis Teil A", "subsections": [
+                ["id": "1", "content": "Gegenstand der Forderungsausfalldeckung"],
+                ["id": "8", "content": "Spezial-Schadenersatzrechtsschutz"],
+                ["id": "1", "content": "Lehnt der Versicherer den Rechtsschutz ab,"],
+                ["id": "2", "content": "Hat der Versicherer seine Leistungspflicht gemäß Absatz (1) verneint und stimmt die versicherte Person der Auffassung des Versicherers nicht zu,"],
+            ]],
+        ]
+        expect(NumberingScope.split(sections: toc, pages: scopePages).scopes.isEmpty,
+               "TOC sections are never split")
+
+        // A whole document part returned as ONE giant section: every verified
+        // scope is peeled off, each titled with its own printed heading.
+        let multiPages = [
+            "--- Seite 2 von 9 ---\nErster Abschnitt\nDie erste Bestimmung gilt für alle Verträge dieser Art ohne jede Ausnahme.\nNoch eine Regel steht hier mit ausreichend eigenem Text für den Abgleich.\nZweiter Abschnitt\nDie zweite Bestimmung gilt nur, wenn sie ausdrücklich vereinbart wurde.\nWeitere Regeln folgen an dieser Stelle mit genügend eigenem Wortlaut.\nDritter Abschnitt\nDie dritte Bestimmung ergänzt die beiden vorangehenden um Sonderfälle.\nAbschließende Regeln stehen hier mit ausreichend eigenem Wortlaut.",
+        ]
+        let giant: [[String: Any]] = [
+            ["id": "", "title": "Teil A", "subsections": [
+                ["id": "1", "content": "Die erste Bestimmung gilt für alle Verträge dieser Art ohne jede Ausnahme."],
+                ["id": "2", "content": "Noch eine Regel steht hier mit ausreichend eigenem Text für den Abgleich."],
+                ["id": "1", "content": "Die zweite Bestimmung gilt nur, wenn sie ausdrücklich vereinbart wurde."],
+                ["id": "2", "content": "Weitere Regeln folgen an dieser Stelle mit genügend eigenem Wortlaut."],
+                ["id": "1", "content": "Die dritte Bestimmung ergänzt die beiden vorangehenden um Sonderfälle."],
+                ["id": "2", "content": "Abschließende Regeln stehen hier mit ausreichend eigenem Wortlaut."],
+            ]],
+        ]
+        let peeled = NumberingScope.split(sections: giant, pages: multiPages)
+        expect(peeled.sections.count == 3
+                   && peeled.scopes == ["Zweiter Abschnitt", "Dritter Abschnitt"]
+                   && peeled.sections.allSatisfy { (($0["subsections"] as? [[String: Any]]) ?? []).count == 2 },
+               "a giant section is peeled into one section per verified scope")
 
         let commaFixed = MarkdownRenderer.render([
             "title": "t",

@@ -340,7 +340,11 @@ enum OrphanItemAudit {
     }
 
     // Original string index where the normalized form of `content` starts
-    // matching `key` — the split point for a fused item.
+    // matching `key` — the split point for a fused item. `map` holds one entry
+    // per UNICODE SCALAR of `norm`, so the offset must be counted in scalars:
+    // String.distance counts grapheme clusters, and decomposed text (NFD
+    // umlauts — PDFKit passes through whatever the PDF producer wrote) adds
+    // scalars without adding characters, shifting the cut early otherwise.
     private static func originalIndex(ofNormalizedKey key: String, in content: String) -> String.Index? {
         var map: [String.Index] = []
         var norm = ""
@@ -350,8 +354,10 @@ enum OrphanItemAudit {
                 map.append(i)
             }
         }
-        guard let range = norm.range(of: key) else { return nil }
-        let offset = norm.distance(from: norm.startIndex, to: range.lowerBound)
+        guard let range = norm.range(of: key),
+              let lower = range.lowerBound.samePosition(in: norm.unicodeScalars)
+        else { return nil }
+        let offset = norm.unicodeScalars.distance(from: norm.unicodeScalars.startIndex, to: lower)
         return offset < map.count ? map[offset] : nil
     }
 

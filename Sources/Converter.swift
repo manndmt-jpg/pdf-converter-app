@@ -188,6 +188,25 @@ struct Converter {
             merged["sections"] = MarkdownRenderer.dropDuplicatedEnumerationSubs(
                 MarkdownRenderer.demoteStrayLetterSections(sections))
         }
+        // Embedded blocks restart their clause numbering under a printed
+        // keyword heading (AHB: the ROLAND conditions under Abschnitt 3
+        // clause 8, "Stichentscheid" 1.–3. after clauses 1.–8.); the model
+        // flattens both scopes into one section, so identical labels collide.
+        // Split at source-verified restarts; the new section's title is the
+        // document's own heading line. A split relocates the run under a
+        // non-numeric section id, which would silence the bare-numbered
+        // warning if the run's labels were fabricated — capture the pre-split
+        // audit so the warning survives the repair.
+        var preSplitBare: [String] = []
+        if let sections = merged["sections"] as? [[String: Any]] {
+            let scoped = NumberingScope.split(sections: sections, pages: pages)
+            if !scoped.scopes.isEmpty {
+                preSplitBare += ClauseAudit.bareNumberedSections(
+                    sections: sections, source: chunks.joined(separator: "\n\n"))
+                merged["sections"] = scoped.sections
+                DebugLog.dump("scope-splits", scoped.scopes.joined(separator: "\n"))
+            }
+        }
         // The enumeration-item backstop: every printed line-start item is
         // verified against the answer and, when dropped or fused label-less
         // into another item, restored from the text layer itself (models drop
@@ -278,6 +297,22 @@ struct Converter {
             }
         }
 
+        // A misbound answer only reveals its numbering scopes once the binding
+        // pass has re-cut it (observed: a pre-binding AHB answer carried the
+        // Stichentscheid labels on the wrong paragraphs, so the scope split
+        // correctly failed closed above). The split is pure and idempotent —
+        // apply it again to the rebound sections, preserving the pre-split
+        // bare-numbered audit like the first application.
+        if let sections = currentMerged["sections"] as? [[String: Any]] {
+            let scoped = NumberingScope.split(sections: sections, pages: pages)
+            if !scoped.scopes.isEmpty {
+                preSplitBare += ClauseAudit.bareNumberedSections(sections: sections, source: sourceText)
+                currentMerged["sections"] = scoped.sections
+                markdown = MarkdownRenderer.render(currentMerged, sourceName: sourceName)
+                DebugLog.dump("scope-splits-postbind", scoped.scopes.joined(separator: "\n"))
+            }
+        }
+
         // The audit compares the source's clause ids against the answer's
         // LABELS (section/subsection ids), not the rendered text: a merged
         // clause keeps its number alive inside cross-references ("siehe Ziffer
@@ -355,8 +390,8 @@ struct Converter {
         // The reverse audit: numbering the answer carries that the PDF does not.
         // Warn only — mutating content on suspicion is worse than flagging it.
         let invented = ClauseAudit.inventedIds(source: sourceText, answer: Self.labelText(of: currentMerged) ?? markdown)
-        let bare = ClauseAudit.bareNumberedSections(
-            sections: (currentMerged["sections"] as? [[String: Any]]) ?? [], source: sourceText)
+        let bare = Array(Set(ClauseAudit.bareNumberedSections(
+            sections: (currentMerged["sections"] as? [[String: Any]]) ?? [], source: sourceText) + preSplitBare)).sorted()
         if !invented.isEmpty || !bare.isEmpty {
             DebugLog.dump("clause-audit-invented",
                           "invented: \(invented.joined(separator: ", ")) | bare-numbered sections: \(bare.joined(separator: ", "))")

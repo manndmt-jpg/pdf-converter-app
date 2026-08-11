@@ -63,6 +63,40 @@ release script signs each nested binary individually.
   all-or-nothing guards; when a model returns a whole document part as one giant
   section, the block degrades to per-family segments so one unmatched anchor cannot
   veto every repair. Same standalone-compilable rule.
+- `NumberingScope.swift` - Foundation-only: splits flattened numbering scopes.
+  Embedded blocks restart clause numbering at 1 under a printed keyword heading
+  (AHB live: the ROLAND conditions under Abschnitt 3 clause 8 print
+  "Stichentscheid" then clauses 1., 1.1.-1.3., 2., 3.); the model reproduces
+  every printed label but flattens both scopes into ONE section (labels collide:
+  3 duplicate labels + 1 order flip in the eval) and absorbs the heading into
+  the preceding paragraph's tail. The split triggers only on a numeric label
+  run restarting at EXACTLY "1." (non-increase landing anywhere else = model
+  error, never split), strictly ascending to the next restart, whose first
+  paragraph is fingerprint-locatable in the text layer with a heading-like
+  line directly above it (starts uppercase; no terminal punctuation; no
+  comma/semicolon ANYWHERE — a wrap line "Rechtsvorschriften, soweit..." is
+  otherwise indistinguishable from a heading; not a clause number/enumerator;
+  number-column lines are skipped) AND whose predecessor line ends a real
+  sentence (terminal punctuation, checked across the page break, and a "." only
+  counts after a word of >= 3 letters — an abbreviation period "u. a." ends no
+  sentence; German capitalizes every noun, so uppercase alone proves nothing
+  and invented numbering under prose would split without these rules). EVERY
+  fingerprint occurrence — across pages AND repeats within one page — must
+  agree on the same heading. The new section is titled with the document's own
+  verbatim heading line; the absorbed tail copy is stripped only on a
+  whitespace-bounded verbatim suffix match. Cut indices are counted in UNICODE
+  SCALARS, not Characters (combining marks are alphanumerics: NFD page text
+  otherwise shifts every cut early — reproduced; same fix applied to
+  OrphanItemAudit.originalIndex, which had the identical copy-pasted bug).
+  Runs twice in Converter: early (clean-but-flattened answers) and again after
+  the binding pass (a misbound answer — pre-v1.12 vertex AHB AND the first
+  live post-v1.14 run observed — only reveals its scopes once rebind has
+  re-cut it; the split is pure and idempotent). Both sites capture
+  ClauseAudit.bareNumberedSections BEFORE splitting and union it into the
+  final warning: relocating a fabricated-numbering run under a non-numeric
+  section id would otherwise silence the warning. Same standalone-compilable
+  rule. Mutation-tested: each guard has a killing fixture in
+  eval/test_regressions.swift.
 - `PageFurniture.swift` - Foundation-only: strips repeating page headers/footers from
   the text layer before the model sees it. PDFKit interleaves footers MID-SENTENCE at
   every page break; observed live (Tarif L/M insurance conditions, 2026-08-10): the

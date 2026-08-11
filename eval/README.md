@@ -12,7 +12,7 @@ scenario from 2026-08-10 and the renderer's front-matter/heading rules):
 
 ```bash
 swiftc -parse-as-library -o /tmp/pdfconv_tests eval/test_regressions.swift \
-    Sources/{PageFurniture,MarkdownRenderer,ClauseAudit,OrphanItemAudit}.swift && /tmp/pdfconv_tests
+    Sources/{PageFurniture,MarkdownRenderer,ClauseAudit,OrphanItemAudit,NumberingScope}.swift && /tmp/pdfconv_tests
 ```
 
 Headless end-to-end conversion (the exact in-app pipeline, OpenRouter only,
@@ -20,7 +20,7 @@ key from `$OPENROUTER_API_KEY` or the app's Keychain item):
 
 ```bash
 swiftc -parse-as-library -O -o /tmp/convert_cli eval/convert_cli.swift \
-    Sources/{Converter,APIResponseParser,DocumentChunker,ClauseAudit,ClauseBinding,MarkdownRenderer,DebugLog,Prompts,Keychain,VertexAuth,AppSettings,PageFurniture,OrphanItemAudit}.swift
+    Sources/{Converter,APIResponseParser,DocumentChunker,ClauseAudit,ClauseBinding,MarkdownRenderer,DebugLog,Prompts,Keychain,VertexAuth,AppSettings,PageFurniture,OrphanItemAudit,NumberingScope}.swift
 /tmp/convert_cli <file.pdf> <output-dir>
 ```
 
